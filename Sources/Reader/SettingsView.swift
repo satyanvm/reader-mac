@@ -44,7 +44,7 @@ final class AccountAction {
             do {
                 try await body()
             } catch is CancellationError {
-                // The person closed the Apple or Google sheet.
+                // The person closed the Google sheet.
             } catch {
                 self.error = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             }
@@ -60,7 +60,6 @@ private struct SignInForm: View {
     @ViewState private var email = ""
     @ViewState private var password = ""
     @ViewState private var action = AccountAction()
-    @ViewState private var apple = AppleSignIn()
     @ViewState private var google = GoogleSignIn()
 
     var body: some View {
@@ -105,19 +104,13 @@ private struct SignInForm: View {
         }
         Section {
             Button {
-                action.run { try await account.signIn(provider: "apple", idToken: try await apple.idToken(window: NSApp.keyWindow)) }
-            } label: {
-                Label("Continue with Apple", systemImage: "apple.logo").frame(maxWidth: .infinity)
-            }
-            .controlSize(.large)
-            Button {
                 action.run { try await account.signIn(provider: "google", idToken: try await google.idToken(window: NSApp.keyWindow)) }
             } label: {
                 Label("Continue with Google", systemImage: "g.circle").frame(maxWidth: .infinity)
             }
             .controlSize(.large)
         } footer: {
-            Text("An Apple or Google account with the same email signs in to the same Reader account.")
+            Text("A Google account with the same email signs in to the same Reader account.")
                 .foregroundStyle(.secondary)
         }
         .disabled(action.working)

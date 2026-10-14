@@ -1,5 +1,5 @@
 #!/bin/bash
-# End-to-end sync check: the real server (../reader/server) and two Macs, simulated as two libraries
+# End-to-end sync check: the real server (the reader-android repo cloned next to this one, as ../reader-android or ../reader) and two Macs, simulated as two libraries
 # with their own device ids, reading the same book. Mac A creates an account (email, password,
 # the emailed code); Mac B signs in to it. Every app run ends in SIGKILL.
 # Usage: scripts/sync-e2e.sh <book.pdf|book.epub> [page] [later-page]
@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 BOOK="$1"; PAGE="${2:-186}"; LATER="${3:-250}"
 WORK="$(mktemp -d)"; LOG="$WORK/log.jsonl"; DB="$WORK/server.sqlite"; PORT=8799
 APP="$(pwd)/build/Reader.app"; BIN="$APP/Contents/MacOS/Reader"
-SERVER="$(cd ../reader/server && pwd)"
+SERVER="$(cd ../reader-android/server 2>/dev/null || cd ../reader/server && pwd)"
 node="node --disable-warning=ExperimentalWarning"
 
 start_server() {

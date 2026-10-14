@@ -5,6 +5,8 @@ import ReaderCore
 
 /// Sign in with Apple, natively. Needs the app signed by an Apple Developer team with the
 /// "Sign in with Apple" capability; the server must list the bundle id in APPLE_AUDIENCES.
+/// Not offered in Settings for now; to bring it back, restore the "Continue with Apple" button
+/// in SettingsView's SignInForm.
 @MainActor
 final class AppleSignIn: NSObject, ASAuthorizationControllerDelegate, ASAuthorizationControllerPresentationContextProviding {
     private var continuation: CheckedContinuation<String, Error>?
