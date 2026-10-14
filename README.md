@@ -1,6 +1,6 @@
 # Reader for macOS
 
-The Mac app (SwiftUI + AppKit, PDFKit, Vision, SQLite). Same features and the same reading-position model as the Android app, so the two sync. The design is in [../docs/position-sync.md](../docs/position-sync.md).
+The Mac app (SwiftUI + AppKit, PDFKit, Vision, SQLite). Same features and the same reading-position model as the Android app, so the two sync. The design is in [../reader/docs/position-sync.md](../reader/docs/position-sync.md).
 
 Requires macOS 14+. Builds with the Command Line Tools alone (no Xcode) and has no third-party dependencies.
 
@@ -22,7 +22,7 @@ Tests use Swift Testing, because XCTest only ships with Xcode. If a build stops 
 
 `build-app.sh` makes `build/Reader.app`, ad-hoc signed, registered for PDF and EPUB so books can be opened from Finder. The library lives in `~/Library/Application Support/Reader` (`READER_SUPPORT_DIR` overrides it).
 
-To sync, run the server in [../server](../server/README.md) and sign in under Reader → Settings… → Account (email and password with an emailed code, or Apple / Google). Without an account, positions are only kept on this Mac and go up once you sign in.
+To sync, run the server in [../reader/server](../reader/server/README.md) and sign in under Reader → Settings… → Account (email and password with an emailed code, or Apple / Google). Without an account, positions are only kept on this Mac and go up once you sign in.
 
 `build-app.sh` takes `READER_SYNC_SERVER` (the server the app signs in to, default the deployed Worker, https://reader-sync.satyanarayanv2050.workers.dev; `http://127.0.0.1:8787` for a local server) and `READER_GOOGLE_CLIENT_ID` (enables Continue with Google). Continue with Apple needs the app signed by an Apple Developer team with the Sign in with Apple capability. `READER_BUNDLE_ID` and `READER_APP_NAME` build a side-by-side dev copy.
 
