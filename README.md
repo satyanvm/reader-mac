@@ -22,7 +22,7 @@ Tests use Swift Testing, because XCTest only ships with Xcode. If a build stops 
 
 `build-app.sh` makes `build/Reader.app`, ad-hoc signed, registered for PDF and EPUB so books can be opened from Finder. The library lives in `~/Library/Application Support/Reader` (`READER_SUPPORT_DIR` overrides it).
 
-To sync, run the server in [reader-android/server](https://github.com/satyanvm/reader-android/tree/main/server) and sign in under Reader → Settings… → Account (email and password with an emailed code, or Google). Without an account, positions are only kept on this Mac and go up once you sign in.
+To sync, run the server in [reader-android/server](https://github.com/satyanvm/reader-android/tree/main/server) and sign in under Reader → Settings… → Account (email and password, or Google; the emailed code is only asked for when the server has `EMAIL_CODES` on). Without an account, positions are only kept on this Mac and go up once you sign in.
 
 `build-app.sh` takes `READER_SYNC_SERVER` (the server the app signs in to, default the deployed Worker, https://reader-sync.satyanarayanv2050.workers.dev; `http://127.0.0.1:8787` for a local server) and `READER_GOOGLE_CLIENT_ID` (enables Continue with Google). Continue with Apple is hidden for now (the code is still in `IdentityProviders.swift`); bringing it back needs the app signed by an Apple Developer team with the Sign in with Apple capability. `READER_BUNDLE_ID` and `READER_APP_NAME` build a side-by-side dev copy.
 

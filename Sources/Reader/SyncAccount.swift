@@ -100,7 +100,10 @@ final class SyncAccount {
 
     func createAccount(email: String, password: String) async throws {
         let email = Self.clean(email)
-        try await api.signUp(email: email, password: password)
+        if let info = try await api.signUp(email: email, password: password) {
+            signedIn(info)
+            return
+        }
         pendingPassword = password
         stage = .awaitingCode(email: email, purpose: .confirmEmail)
     }
