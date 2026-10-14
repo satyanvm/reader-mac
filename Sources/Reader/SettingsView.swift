@@ -80,14 +80,15 @@ private struct SignInForm: View {
         } footer: {
             VStack(alignment: .leading, spacing: 6) {
                 if let error = action.error { Text(error).foregroundStyle(.red) }
-                if mode == .create {
+                if mode == .create && account.providers.emailCodes {
                     Text("We'll email you a code to confirm the address is yours.").foregroundStyle(.secondary)
                 }
             }
         }
         Section {
             HStack {
-                if mode == .signIn {
+                // Resetting a password needs an emailed code.
+                if mode == .signIn && account.providers.emailCodes {
                     Button("Forgot password?") {
                         action.run { try await account.forgotPassword(email: email) }
                     }

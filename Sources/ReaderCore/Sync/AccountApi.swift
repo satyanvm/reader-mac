@@ -38,10 +38,22 @@ public struct AccountApi: Sendable {
     public struct Providers: Decodable, Equatable, Sendable {
         public var apple: Bool
         public var google: Bool
+        /// New accounts confirm their email with a code, and passwords can be reset. Servers
+        /// that don't say have codes on.
+        public var emailCodes: Bool
 
-        public init(apple: Bool, google: Bool) {
+        public init(apple: Bool, google: Bool, emailCodes: Bool = true) {
             self.apple = apple
             self.google = google
+            self.emailCodes = emailCodes
+        }
+
+        public init(from decoder: Decoder) throws {
+            enum Keys: String, CodingKey { case apple, google, emailCodes }
+            let c = try decoder.container(keyedBy: Keys.self)
+            self.init(apple: try c.decode(Bool.self, forKey: .apple),
+                      google: try c.decode(Bool.self, forKey: .google),
+                      emailCodes: try c.decodeIfPresent(Bool.self, forKey: .emailCodes) ?? true)
         }
     }
 
@@ -49,9 +61,13 @@ public struct AccountApi: Sendable {
         try JSONDecoder().decode(Providers.self, from: try await call("GET", "v1/auth/providers"))
     }
 
-    /// Creates the account (or refreshes an unconfirmed one) and emails a code.
-    public func signUp(email: String, password: String) async throws {
-        _ = try await call("POST", "v1/auth/signup", ["email": email, "password": password])
+    /// Creates the account (or refreshes an unconfirmed one) and emails a code; returns nil then.
+    /// A server with email codes off signs the new account in at once and returns its session.
+    public func signUp(email: String, password: String) async throws -> AccountSessionInfo? {
+        let data = try await call("POST", "v1/auth/signup", ["email": email, "password": password])
+        struct Reply: Decodable { var token: String? }
+        guard (try? JSONDecoder().decode(Reply.self, from: data))?.token != nil else { return nil }
+        return try sessionInfo(data)
     }
 
     public func verify(email: String, code: String) async throws -> AccountSessionInfo {
