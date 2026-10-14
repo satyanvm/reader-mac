@@ -2,30 +2,52 @@ import AppKit
 import ReaderCore
 import SwiftUI
 
-/// One book window. Its model is created once, when the window appears (a view's initializer
-/// can run many times, so it must not create anything).
+/// The main window: the library, with the open book pushed on top of it.
+struct MainView: View {
+    @Environment(\.openWindow) private var openWindow
+    private let navigation = AppGraph.shared.navigation
+
+    var body: some View {
+        NavigationStack(path: Binding(get: { navigation.path }, set: { navigation.path = $0 })) {
+            LibraryView()
+                .navigationDestination(for: String.self) { id in
+                    ReaderWindow(documentId: id).id(id)
+                }
+        }
+        .onAppear { AppGraph.shared.openMainWindow = { openWindow(id: "main") } }
+        // Closing the window closes the book; it opens on the library next time.
+        .onDisappear { navigation.path = [] }
+    }
+}
+
+/// One open book. Its model is created once, when the view appears (a view's initializer can
+/// run many times, so it must not create anything).
 struct ReaderWindow: View {
     let documentId: String
     @ViewState private var model: ReaderModel?
-    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        if let model {
-            ReaderContent(model: model)
-        } else {
-            Color.clear.onAppear {
-                // Window restoration can bring back a second window for a book that's already
-                // open; keep one.
-                if (try? AppGraph.shared.documents.get(documentId)) == nil {
-                    // A restored window for a book that was removed (or belongs to another
-                    // library): nothing to show.
-                    dismiss()
-                } else if let open = AppGraph.shared.model(for: documentId) {
-                    open.probe?.probeWindow?.makeKeyAndOrderFront(nil)
-                    dismiss()
-                } else {
-                    model = ReaderModel(documentId: documentId, graph: .shared)
+        Group {
+            if let model {
+                ReaderContent(model: model)
+            } else {
+                Color.clear.onAppear {
+                    if (try? AppGraph.shared.documents.get(documentId)) == nil {
+                        // Removed (here or on another device): nothing to show.
+                        AppGraph.shared.showLibrary()
+                    } else {
+                        model = AppGraph.shared.model(for: documentId) ?? ReaderModel(documentId: documentId, graph: .shared)
+                    }
                 }
+            }
+        }
+        .navigationBarBackButtonHidden(true)
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button { AppGraph.shared.showLibrary() } label: {
+                    Label("Library", systemImage: "chevron.left")
+                }
+                .help("Back to the library (⌘[)")
             }
         }
     }
@@ -36,7 +58,7 @@ struct ReaderContent: View {
 
     var body: some View {
         let state = model.state
-        let theme = model.isTextMode ? model.theme : .light
+        let theme = model.theme
         VStack(spacing: 0) {
             ZStack(alignment: .top) {
                 content(state, theme: theme)
@@ -63,7 +85,7 @@ struct ReaderContent: View {
         .navigationTitle(state.title.isEmpty ? "Reader" : state.title)
         .toolbar { ReaderToolbar(model: model, state: state) }
         .focusedSceneValue(\.reader, model)
-        .preferredColorScheme(model.isTextMode ? (theme.isDark ? .dark : .light) : nil)
+        .preferredColorScheme(theme.isDark ? .dark : .light)
         .onDisappear { model.close() }
     }
 
@@ -76,13 +98,13 @@ struct ReaderContent: View {
             ContentUnavailableView("Can't open this book", systemImage: "exclamationmark.triangle", description: Text(message))
         default:
             if model.epub != nil, let source = model.flowSource() {
-                FlowingTextView(model: model, source: source, state: state, theme: theme)
+                FlowingTextView(model: model, source: source, state: state, theme: theme, layout: model.flowLayout, spread: model.spread)
             } else if let pdf = model.pdf {
                 if state.mode == .text, let source = model.flowSource() {
-                    FlowingTextView(model: model, source: source, state: state, theme: theme)
+                    FlowingTextView(model: model, source: source, state: state, theme: theme, layout: model.flowLayout, spread: model.spread)
                         .id("text")
                 } else {
-                    PagesView(model: model, book: pdf, state: state).id("pages")
+                    PagesView(model: model, book: pdf, state: state, theme: theme, spread: model.spread).id("pages")
                 }
             }
         }
@@ -104,9 +126,18 @@ struct ReaderToolbar: ToolbarContent {
                 .help("Show the PDF's own pages, or its text reflowed like an ebook")
             }
             if state.document != nil {
-                if model.isTextMode {
-                    TextSettingsMenu(model: model, scale: state.textScale)
-                } else {
+                if model.canChooseSpread {
+                    Picker("Pages", selection: Binding(get: { model.spread }, set: { model.setSpread($0) })) {
+                        ForEach(PageSpread.allCases) { s in
+                            Label(s.label, systemImage: s.icon).tag(s)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelStyle(.iconOnly)
+                    .help("One page, or two side by side (⌥⌘1 / ⌥⌘2)")
+                }
+                ReadingSettingsMenu(model: model, scale: state.textScale)
+                if !model.isTextMode {
                     ControlGroup {
                         Button { model.zoomOut() } label: { Label("Zoom Out", systemImage: "minus.magnifyingglass") }
                             .disabled(!model.canZoomOut)
@@ -125,26 +156,38 @@ struct ReaderToolbar: ToolbarContent {
     }
 }
 
-struct TextSettingsMenu: View {
+/// Theme in every mode; text size and layout in flowing text.
+struct ReadingSettingsMenu: View {
     let model: ReaderModel
     let scale: Float
 
     var body: some View {
         Menu {
-            Section("Text Size · \(Int((scale * 100).rounded()))%") {
-                Button("Larger") { model.zoomIn() }.disabled(!model.canZoomIn)
-                Button("Smaller") { model.zoomOut() }.disabled(!model.canZoomOut)
-                Button("Default Size") { model.setTextScale(1) }
+            if model.isTextMode {
+                Section("Text Size · \(Int((scale * 100).rounded()))%") {
+                    Button("Larger") { model.zoomIn() }.disabled(!model.canZoomIn)
+                    Button("Smaller") { model.zoomOut() }.disabled(!model.canZoomOut)
+                    Button("Default Size") { model.setTextScale(1) }
+                }
             }
             Section("Theme") {
                 ForEach(TextTheme.allCases) { t in
-                    Toggle(t.label, isOn: Binding(get: { model.theme == t }, set: { _ in model.setTheme(t) }))
+                    Toggle(isOn: Binding(get: { model.theme == t }, set: { _ in model.setTheme(t) })) {
+                        Label(t.label, systemImage: t.swatch)
+                    }
+                }
+            }
+            if model.isTextMode {
+                Section("Layout") {
+                    ForEach(FlowLayout.allCases) { l in
+                        Toggle(l.label, isOn: Binding(get: { model.flowLayout == l }, set: { _ in model.setFlowLayout(l) }))
+                    }
                 }
             }
         } label: {
-            Label("Text Settings", systemImage: "textformat.size")
+            Label("Reading Settings", systemImage: "textformat.size")
         }
-        .help("Text size and theme")
+        .help(model.isTextMode ? "Text size, theme and layout" : "Theme")
     }
 }
 

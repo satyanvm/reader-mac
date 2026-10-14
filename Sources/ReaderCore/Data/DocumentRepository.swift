@@ -73,6 +73,10 @@ public final class DocumentRepository: @unchecked Sendable {
         }
     }
 
+    public func all() throws -> [DocumentRecord] {
+        try db.sql.query("SELECT * FROM documents").map(Self.record)
+    }
+
     public func get(_ id: String) throws -> DocumentRecord? {
         try db.sql.query("SELECT * FROM documents WHERE id = ?", [.text(id)]).first.map(Self.record)
     }
@@ -93,8 +97,9 @@ public final class DocumentRepository: @unchecked Sendable {
     }
 
     /// Copies `source` into app storage (hashing as it goes) and adds it to the library. Importing
-    /// the same bytes again returns the existing document.
-    public func importFile(_ source: URL) throws -> DocumentRecord {
+    /// the same bytes again returns the existing document. `title` (a book synced from another
+    /// device) is used instead of the file's own title for a new document.
+    public func importFile(_ source: URL, title: String? = nil) throws -> DocumentRecord {
         let tmp = dir.appendingPathComponent("import-\(UUID().uuidString).tmp")
         defer { try? FileManager.default.removeItem(at: tmp) }
         let accessing = source.startAccessingSecurityScopedResource()
@@ -145,7 +150,7 @@ public final class DocumentRepository: @unchecked Sendable {
             let size = ((try? FileManager.default.attributesOfItem(atPath: target.path))?[.size] as? NSNumber)?.int64Value ?? 0
             record = DocumentRecord(
                 id: id,
-                title: bookTitle ?? source.deletingPathExtension().lastPathComponent,
+                title: title ?? bookTitle ?? source.deletingPathExtension().lastPathComponent,
                 localPath: target.path,
                 sizeBytes: size,
                 pageCount: pages,

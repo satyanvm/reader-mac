@@ -42,9 +42,13 @@ Everything in `ReaderCore` mirrors a file in the Android app and makes the same 
 
 ## Mac specifics
 
-- One window per book, any number open. Book windows come back on relaunch.
+- One window. It opens on the library; a book opens on top of it, and the back arrow (⌘[ or ⇧⌘L) returns to the library.
+- Signed in, the library is the account's: a book added on another device downloads here, and removing a book removes it everywhere (`LibrarySync`, server `/v1/library`). Signing in goes straight to the library.
+- Themes: White, Sepia (the default), Dark and Black, in flowing text and original pages.
+- One page or two side by side (toolbar, or ⌥⌘1 / ⌥⌘2): original pages in pairs, and flowing text read page by page as an open book. Two pages need a window at least 760 pt wide (700 for original pages).
 - Keys: space / ⇧space page through the window, ← → previous/next page (chapter in EPUBs), ↑ ↓ scroll, ⌘+ ⌘− ⌘0 zoom (text size in flowing text), ⌘1 / ⌘2 original pages / flowing text, ⌥⌘↑ ⌥⌘↓ previous/next page, ⌘F find.
 - Trackpad pinch zooms original pages.
+- Flowing text turns a window at a time by default, like Play Books, with the new page sliding in over the old (a cross-fade with Reduce Motion): a swipe, a scroll-wheel notch, space, the arrow keys or page up/down turn one page, and a line cut by the bottom edge is held back to start the next page. Text Settings → Layout (or View → Text Layout) switches to one continuous scroll; the choice applies to every book on this Mac.
 - Saves also flush on window close, quit, deactivation and sleep. Nothing depends on that: the debounced writes alone keep the saved position within half a second of where the reader stopped.
 - In flowing text, only scrolling the reader causes is saved. Text above the window grows as pages finish building, and any movement that causes is undone rather than recorded.
 

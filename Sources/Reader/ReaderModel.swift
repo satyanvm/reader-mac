@@ -17,6 +17,8 @@ final class ReaderModel {
     @ObservationIgnored private var pdfURL: URL?
     @ObservationIgnored private var closed = false
     @ObservationIgnored private var cachedFlowSource: FlowSource?
+    /// Original pages are shown two at a time, so next/previous page moves by two.
+    @ObservationIgnored var pagesTwoUp = false
     /// The view currently showing this book (for the self-test harness).
     @ObservationIgnored weak var probe: ReaderViewProbe?
 
@@ -47,6 +49,10 @@ final class ReaderModel {
     var epub: EpubBook? { state.document as? EpubBook }
     var isTextMode: Bool { state.mode == .text }
     var theme: TextTheme { prefs.theme }
+    var flowLayout: FlowLayout { prefs.flowLayout }
+    var spread: PageSpread { prefs.spread }
+    /// One page or two applies to original pages and to flowing text read page by page.
+    var canChooseSpread: Bool { state.document != nil && (!isTextMode || flowLayout == .paged) }
 
     private func load() async throws -> LoadedDocument {
         guard let doc = try graph.documents.get(documentId) else { throw ReaderError(message: "This book is no longer in your library") }
@@ -101,9 +107,12 @@ final class ReaderModel {
     }
 
     func setTheme(_ theme: TextTheme) { prefs.theme = theme }
+    func setFlowLayout(_ layout: FlowLayout) { prefs.flowLayout = layout }
+    func setSpread(_ spread: PageSpread) { prefs.spread = spread }
 
-    func nextPage() { controller.goToPage(state.pageIndex + 1) }
-    func previousPage() { controller.goToPage(state.pageIndex - 1) }
+    private var pageStep: Int { !isTextMode && pagesTwoUp ? 2 : 1 }
+    func nextPage() { controller.goToPage(state.pageIndex + pageStep) }
+    func previousPage() { controller.goToPage(max(0, state.pageIndex - pageStep)) }
     func goToPage(_ index: Int) { controller.goToPage(index) }
     func restartFromBeginning() { controller.restartFromBeginning() }
 
