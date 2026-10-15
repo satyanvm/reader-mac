@@ -2,8 +2,9 @@ import ReaderCore
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// The home page: every book in the library (with the account's books from other devices when
+/// signed in). Opening one shows it in this window, with a back arrow to return here.
 struct LibraryView: View {
-    @Environment(\.openWindow) private var openWindow
     @ViewState private var rows: [LibraryRow] = []
     @ViewState private var selection: String?
     @ViewState private var dropTargeted = false
@@ -14,7 +15,9 @@ struct LibraryView: View {
                 ContentUnavailableView {
                     Label("No books yet", systemImage: "books.vertical")
                 } description: {
-                    Text("Open a PDF or EPUB to start reading, or drop one here.")
+                    Text(AppGraph.shared.account.isSignedIn
+                         ? "Open a PDF or EPUB to start reading, or drop one here. Books you add on your other devices appear here too."
+                         : "Open a PDF or EPUB to start reading, or drop one here.")
                 } actions: {
                     Button("Open Book…") { AppGraph.shared.showOpenPanel() }
                         .keyboardShortcut(.defaultAction)
@@ -35,7 +38,8 @@ struct LibraryView: View {
                     .tag(row.id)
                     .contextMenu {
                         Button("Open") { AppGraph.shared.show(row.id) }
-                        Button("Remove from Library", role: .destructive) { remove(row) }
+                        Button(AppGraph.shared.account.isSignedIn ? "Remove from Library on All Devices" : "Remove from Library",
+                               role: .destructive) { remove(row) }
                     }
                 }
                 .contextMenu(forSelectionType: String.self) { _ in } primaryAction: { ids in
@@ -47,6 +51,7 @@ struct LibraryView: View {
                 }
             }
         }
+        .safeAreaInset(edge: .bottom) { LibrarySyncStatus() }
         .frame(minWidth: 380, minHeight: 300)
         .navigationTitle("Library")
         .toolbar {
@@ -66,8 +71,8 @@ struct LibraryView: View {
         }
         .overlay { if dropTargeted { RoundedRectangle(cornerRadius: 8).stroke(.tint, lineWidth: 3).padding(4) } }
         .onAppear {
-            AppGraph.shared.openWindow = { id in openWindow(value: id) }
             reload()
+            AppGraph.shared.librarySync.sync()
         }
         .onReceive(NotificationCenter.default.publisher(for: ReaderDatabase.didChange)) { _ in reload() }
     }
@@ -77,7 +82,7 @@ struct LibraryView: View {
     }
 
     private func remove(_ row: LibraryRow) {
-        try? AppGraph.shared.documents.remove(row.id)
+        AppGraph.shared.removeBook(row.id)
     }
 }
 
@@ -95,5 +100,32 @@ struct AccountButton: View {
         }
         .labelStyle(.titleAndIcon)
         .help(account.isSignedIn ? "Your place syncs to your other devices" : "Sign in to keep your place on all your devices")
+    }
+}
+
+/// While books are coming in from (or going up to) the account, and what went wrong if they couldn't.
+struct LibrarySyncStatus: View {
+    private let account = AppGraph.shared.account
+
+    var body: some View {
+        if account.isSignedIn, account.isSyncingLibrary || account.libraryError != nil {
+            HStack(spacing: 8) {
+                if account.isSyncingLibrary {
+                    ProgressView().controlSize(.small)
+                    Text("Syncing your library…")
+                } else if let error = account.libraryError {
+                    Image(systemName: "exclamationmark.icloud")
+                    Text(error).lineLimit(2)
+                    Spacer()
+                    Button("Retry") { account.syncNow() }.buttonStyle(.link)
+                }
+            }
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.bar)
+        }
     }
 }

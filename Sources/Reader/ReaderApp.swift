@@ -7,19 +7,13 @@ struct ReaderApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     var body: some Scene {
-        Window("Library", id: "library") {
-            LibraryView()
+        // One window: the library is its home page, and a book opens on top of it with a back
+        // arrow to return. It always opens on the library.
+        Window("Reader", id: "main") {
+            MainView()
         }
-        .defaultSize(width: 520, height: 600)
+        .defaultSize(width: 980, height: 900)
         .commands { ReaderCommands() }
-
-        // One window per book; any number can be open. Open book windows come back on relaunch.
-        WindowGroup("Book", id: "reader", for: String.self) { $documentId in
-            if let documentId {
-                ReaderWindow(documentId: documentId)
-            }
-        }
-        .defaultSize(width: 900, height: 1000)
 
         Settings {
             SettingsView()
@@ -58,13 +52,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 struct ReaderCommands: Commands {
     @FocusedValue(\.reader) private var reader
-    @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
             Button("Open…") { AppGraph.shared.showOpenPanel() }
                 .keyboardShortcut("o")
-            Button("Library") { openWindow(id: "library") }
+            Button("Library") { AppGraph.shared.showLibrary() }
                 .keyboardShortcut("l", modifiers: [.command, .shift])
         }
 
@@ -90,11 +83,27 @@ struct ReaderCommands: Commands {
                     Button(t.label) { reader?.setTheme(t) }
                 }
             }
+            .disabled(reader == nil)
+            Menu("Text Layout") {
+                ForEach(FlowLayout.allCases) { l in
+                    Button(l.label) { reader?.setFlowLayout(l) }
+                }
+            }
             .disabled(reader?.isTextMode != true)
+            Button("Single Page") { reader?.setSpread(.single) }
+                .keyboardShortcut("1", modifiers: [.command, .option])
+                .disabled(reader?.canChooseSpread != true)
+            Button("Two Pages") { reader?.setSpread(.double) }
+                .keyboardShortcut("2", modifiers: [.command, .option])
+                .disabled(reader?.canChooseSpread != true)
             Divider()
         }
 
         CommandMenu("Go") {
+            Button("Back to Library") { AppGraph.shared.showLibrary() }
+                .keyboardShortcut("[")
+                .disabled(reader == nil)
+            Divider()
             Button("Next Page") { reader?.nextPage() }
                 .keyboardShortcut(.downArrow, modifiers: [.command, .option])
                 .disabled(reader == nil)

@@ -6,17 +6,24 @@ import SwiftUI
 /// Original pages, top to bottom. Pages are laid out at the window's width (`PageLayout`, the
 /// same math as Android); zoom is the scroll view's magnification, so pinch-to-zoom is native and
 /// zooming never changes the layout's coordinates.
+///
+/// Two pages: pages go side by side in pairs (1–2, 3–4, …), each row laid out like one wide page.
+/// A position is then the row's left page and how far down the row the window is.
 struct PagesView: NSViewRepresentable {
     let model: ReaderModel
     let book: PdfBook
     /// Read in `body`, so SwiftUI calls `updateNSView` whenever it changes.
     let state: ReaderUiState
+    let theme: TextTheme
+    let spread: PageSpread
 
     func makeCoordinator() -> PagesCoordinator { PagesCoordinator(controller: model.controller, model: model, book: book) }
 
     func makeNSView(context: Context) -> NSScrollView { context.coordinator.scrollView }
 
     func updateNSView(_ view: NSScrollView, context: Context) {
+        context.coordinator.theme = theme
+        context.coordinator.spread = spread
         context.coordinator.update()
     }
 
@@ -38,9 +45,15 @@ final class PagesCoordinator: NSObject {
     /// True while this view moves the scroll position itself; those moves aren't reading.
     private var applying = false
     private var applyScheduled = false
+    var theme: TextTheme = .sepia
+    var spread: PageSpread = .single
+    /// The current layout puts pages side by side.
+    private var twoUp = false
 
     static let gap = 12
     static let inset = 12
+    /// Narrower than this, two pages would be too small to read; one is shown instead.
+    static let minSpreadWidth = 700
 
     init(controller: ReaderController, model: ReaderModel, book: PdfBook) {
         self.controller = controller
@@ -62,7 +75,7 @@ final class PagesCoordinator: NSObject {
         scrollView.minMagnification = CGFloat(ReadingPosition.minZoom)
         scrollView.maxMagnification = CGFloat(ReadingPosition.maxZoom)
         scrollView.drawsBackground = true
-        scrollView.backgroundColor = .underPageBackgroundColor
+        scrollView.backgroundColor = theme.background
         scrollView.documentView = documentView
         scrollView.keyHandler = { [weak self] event in self?.handleKey(event) ?? false }
 
@@ -85,10 +98,16 @@ final class PagesCoordinator: NSObject {
     /// Keyed to this view's own mode: a view that is being replaced (mode switch) can never
     /// answer a restore meant for its successor or have its scroll reports accepted.
     private var currentKey: LayoutKey {
-        var key = controller.state.layoutKey(viewportWidth: viewportWidth)
+        // Two pages make each page half as wide: a different layout, so switching re-applies
+        // the position to it.
+        var key = controller.state.layoutKey(viewportWidth: twoUp ? viewportWidth / 2 : viewportWidth)
         key.mode = .pages
         return key
     }
+
+    /// Row and page indices: one page per row, or two.
+    private func row(ofPage page: Int) -> Int { twoUp ? page / 2 : page }
+    private func page(ofRow row: Int) -> Int { twoUp ? row * 2 : row }
 
     private var detached = false
     /// This view is on screen and showing the controller's current mode.
@@ -115,9 +134,19 @@ final class PagesCoordinator: NSObject {
 
     private func relayoutIfNeeded() {
         let width = viewportWidth
-        guard width > 0, width != layout.contentWidth else { return }
-        layout = PageLayout(pages: book.pageSizes, contentWidth: width, gap: Self.gap, topInset: Self.inset)
+        let wantTwoUp = spread == .double && width >= Self.minSpreadWidth && book.pageCount > 1
+        let background = theme.background
+        if documentView.background != background {
+            documentView.background = background
+            scrollView.backgroundColor = background
+        }
+        guard width > 0, width != layout.contentWidth || wantTwoUp != twoUp else { return }
+        twoUp = wantTwoUp
+        model?.pagesTwoUp = wantTwoUp
+        layout = PageLayout(pages: wantTwoUp ? Self.rows(book.pageSizes) : book.pageSizes, contentWidth: width,
+                            gap: Self.gap, topInset: Self.inset)
         applying = true
+        documentView.twoUp = wantTwoUp
         documentView.layout = layout
         documentView.frame = NSRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(layout.totalHeight))
         applying = false
@@ -130,7 +159,7 @@ final class PagesCoordinator: NSObject {
         let zoom = CGFloat(controller.state.zoom)
         if abs(scrollView.magnification - zoom) > 0.001 { scrollView.magnification = zoom }
         let target = r.target
-        let y = CGFloat(layout.y(pageIndex: target?.pageIndex ?? 0, fraction: target?.pageOffset ?? 0))
+        let y = CGFloat(layout.y(pageIndex: row(ofPage: target?.pageIndex ?? 0), fraction: target?.pageOffset ?? 0))
         let maxX = max(0, documentView.frame.width - clip.bounds.width)
         let maxY = max(0, documentView.frame.height - clip.bounds.height)
         let x = CGFloat(target?.horizontalOffset ?? 0) * maxX
@@ -151,7 +180,15 @@ final class PagesCoordinator: NSObject {
         let maxX = max(0, documentView.frame.width - b.width)
         let horizontal: Float = maxX > 0.5 ? Float(min(1, max(0, b.minX / maxX))) : 0
         let atEnd = b.minY >= documentView.frame.height - b.height - 1
-        return (slot.index, layout.fraction(at: slot.index, offset: slot.offset), horizontal, atEnd)
+        return (min(page(ofRow: slot.index), book.pageCount - 1), layout.fraction(at: slot.index, offset: slot.offset), horizontal, atEnd)
+    }
+
+    /// Pages in pairs, each pair as one page as wide as both and as tall as the taller.
+    static func rows(_ pages: [PageSize]) -> [PageSize] {
+        stride(from: 0, to: pages.count, by: 2).map { i in
+            let ratio = pages[i...min(i + 1, pages.count - 1)].map { Double($0.height) / Double(max(1, $0.width)) }.max() ?? 1.4
+            return PageSize(width: 2000, height: Int((1000 * ratio).rounded()))
+        }
     }
 
     @objc private func boundsChanged() {
@@ -186,6 +223,11 @@ final class PagesDocumentView: NSView {
     var layout: PageLayout? {
         didSet { needsDisplay = true }
     }
+    /// Each row of `layout` holds two pages.
+    var twoUp = false
+    var background: NSColor = .underPageBackgroundColor {
+        didSet { needsDisplay = true }
+    }
 
     init(book: PdfBook) {
         self.book = book
@@ -198,26 +240,43 @@ final class PagesDocumentView: NSView {
     override var isOpaque: Bool { true }
 
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.underPageBackgroundColor.setFill()
-        dirtyRect.fill()
+        background.setFill()
+        bounds.intersection(dirtyRect).fill()
         guard let layout, let ctx = NSGraphicsContext.current?.cgContext else { return }
         var i = layout.slot(atY: Double(dirtyRect.minY)).index
         while i < layout.pageCount, CGFloat(layout.pageTops[i]) <= dirtyRect.maxY {
-            let rect = NSRect(x: 0, y: CGFloat(layout.pageTops[i]), width: CGFloat(layout.contentWidth),
-                              height: CGFloat(layout.pageHeights[i]))
-            if rect.intersects(dirtyRect), let page = book.page(i) {
-                NSColor.white.setFill()
-                rect.fill()
-                ctx.saveGState()
-                ctx.clip(to: rect.intersection(dirtyRect))
-                ctx.translateBy(x: rect.minX, y: rect.maxY)
-                let scale = rect.width / CGFloat(book.pageSizes[i].width)
-                ctx.scaleBy(x: scale, y: -scale)
-                page.draw(with: .cropBox, to: ctx)
-                ctx.restoreGState()
+            let row = NSRect(x: 0, y: CGFloat(layout.pageTops[i]), width: CGFloat(layout.contentWidth),
+                             height: CGFloat(layout.pageHeights[i]))
+            if row.intersects(dirtyRect) {
+                if twoUp {
+                    // Left and right pages in each half, a small gutter between, centred vertically.
+                    let gutter: CGFloat = 4
+                    let half = row.width / 2
+                    for (k, x) in [(2 * i, 0), (2 * i + 1, half + gutter)] where k < book.pageCount {
+                        let size = book.pageSizes[k]
+                        let w = half - gutter
+                        let h = w * CGFloat(size.height) / CGFloat(max(1, size.width))
+                        drawPage(k, in: NSRect(x: x, y: row.minY + (row.height - h) / 2, width: w, height: h), dirty: dirtyRect, ctx)
+                    }
+                } else {
+                    drawPage(i, in: row, dirty: dirtyRect, ctx)
+                }
             }
             i += 1
         }
+    }
+
+    private func drawPage(_ index: Int, in rect: NSRect, dirty: NSRect, _ ctx: CGContext) {
+        guard rect.intersects(dirty), let page = book.page(index) else { return }
+        NSColor.white.setFill()
+        rect.fill()
+        ctx.saveGState()
+        ctx.clip(to: rect.intersection(dirty))
+        ctx.translateBy(x: rect.minX, y: rect.maxY)
+        let scale = rect.width / CGFloat(book.pageSizes[index].width)
+        ctx.scaleBy(x: scale, y: -scale)
+        page.draw(with: .cropBox, to: ctx)
+        ctx.restoreGState()
     }
 }
 
@@ -248,6 +307,36 @@ final class ReaderScrollView: NSScrollView {
             return true
         default:
             return false
+        }
+    }
+
+    /// Set in page-by-page flowing text: a scroll or swipe turns one page (true = forward)
+    /// instead of moving the text.
+    var pageTurnHandler: ((Bool) -> Void)?
+    private var gestureDelta: CGFloat = 0
+    private var gestureTurned = false
+    private var lastWheelTurn: TimeInterval = 0
+
+    override func scrollWheel(with event: NSEvent) {
+        guard let pageTurnHandler else { return super.scrollWheel(with: event) }
+        if !event.momentumPhase.isEmpty { return } // one swipe turns one page; ignore its coasting
+        // Negative deltas move toward the end of the book (swipe up or left with natural scrolling).
+        let delta = abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) ? event.scrollingDeltaX : event.scrollingDeltaY
+        if event.phase.isEmpty {
+            // A mouse wheel: each notch turns a page, with a short pause so a spin doesn't skip many.
+            guard delta != 0, event.timestamp - lastWheelTurn > 0.25 else { return }
+            lastWheelTurn = event.timestamp
+            pageTurnHandler(delta < 0)
+            return
+        }
+        if event.phase.contains(.began) || event.phase.contains(.mayBegin) {
+            gestureDelta = 0
+            gestureTurned = false
+        }
+        gestureDelta += delta
+        if !gestureTurned, abs(gestureDelta) > 24 {
+            gestureTurned = true
+            pageTurnHandler(gestureDelta < 0)
         }
     }
 
@@ -304,12 +393,20 @@ enum ReaderKeys {
 
 extension PagesCoordinator: ReaderViewProbe {
     var probeWindow: NSWindow? { scrollView.window }
+    /// Saves the visible pages as a PNG.
+    func probeSave(_ url: URL) {
+        guard let doc = scrollView.documentView else { return }
+        let visible = doc.visibleRect
+        guard let rep = doc.bitmapImageRepForCachingDisplay(in: visible) else { return }
+        doc.cacheDisplay(in: visible, to: rep)
+        try? rep.representation(using: .png, properties: [:])?.write(to: url)
+    }
     func probeMeasure() -> (page: Int, fraction: Float) { let m = measure(); return (m.page, m.fraction) }
     func probeScroll(page: Int, fraction: Float) {
         // Moves the clip view like a scroll wheel does: reported as reading.
         let clip = scrollView.contentView
         scrollView.simulatingUserInput = true
-        clip.scroll(to: NSPoint(x: clip.bounds.minX, y: CGFloat(layout.y(pageIndex: page, fraction: fraction))))
+        clip.scroll(to: NSPoint(x: clip.bounds.minX, y: CGFloat(layout.y(pageIndex: row(ofPage: page), fraction: fraction))))
         scrollView.reflectScrolledClipView(clip)
         scrollView.simulatingUserInput = false
     }

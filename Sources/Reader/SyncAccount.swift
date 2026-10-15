@@ -29,6 +29,9 @@ final class SyncAccount {
     private(set) var lastError: String?
     private(set) var pendingCount = 0
     private(set) var isSyncing = false
+    /// The last library sync's problem, if it had one (a book too large to upload, no network).
+    private(set) var libraryError: String?
+    private(set) var isSyncingLibrary = false
 
     @ObservationIgnored let serverURL: URL
     @ObservationIgnored private let api: AccountApi
@@ -36,6 +39,7 @@ final class SyncAccount {
     @ObservationIgnored private let engine: SyncEngine
     @ObservationIgnored private let scheduler: SyncScheduler
     @ObservationIgnored private let positions: ReadingPositionRepository
+    @ObservationIgnored private let library: LibrarySync
     @ObservationIgnored private var session: AccountSessionInfo?
     /// The password typed at sign-up, kept in memory only until the code is confirmed.
     @ObservationIgnored private var pendingPassword: String?
@@ -49,13 +53,14 @@ final class SyncAccount {
         }
     }
 
-    init(libraryDir: URL, engine: SyncEngine, scheduler: SyncScheduler, positions: ReadingPositionRepository) {
+    init(libraryDir: URL, engine: SyncEngine, scheduler: SyncScheduler, positions: ReadingPositionRepository, library: LibrarySync) {
         file = libraryDir.appendingPathComponent("sync-account.json")
         serverURL = Self.configuredServer()
         api = AccountApi(baseURL: serverURL)
         self.engine = engine
         self.scheduler = scheduler
         self.positions = positions
+        self.library = library
         if let data = try? Data(contentsOf: file), let saved = try? JSONDecoder().decode(AccountSessionInfo.self, from: data),
            !saved.token.isEmpty {
             session = saved
@@ -72,6 +77,13 @@ final class SyncAccount {
         }
         scheduler.onResult = { [weak self] ok, at in
             MainActor.assumeIsolated { self?.record(ok: ok, at: at) }
+        }
+        library.onStart = { [weak self] in self?.isSyncingLibrary = true }
+        library.onResult = { [weak self] error in
+            guard let self else { return }
+            self.isSyncingLibrary = false
+            self.libraryError = error
+            if error == "unauthorized" { engine.onUnauthorized?() }
         }
         apply()
         Task { await loadProviders() }
@@ -162,11 +174,14 @@ final class SyncAccount {
         stage = .signedOut
         save()
         apply()
+        library.reset()
         lastSuccess = nil
         lastError = nil
+        libraryError = nil
     }
 
-    /// Push now (pending local positions), and check the server for the open books.
+    /// Push now (pending local positions), check the server for the open books, and bring the
+    /// library up to date both ways.
     func syncNow() {
         guard isSignedIn else { return }
         isSyncing = true
@@ -184,8 +199,10 @@ final class SyncAccount {
         stage = .signedIn(email: info.email)
         save()
         apply()
-        // Reading done on this Mac before signing in goes up now, and open books catch up.
+        // Reading done on this Mac before signing in goes up now, open books catch up, and the
+        // account's books come in while the library is on screen.
         syncNow()
+        AppGraph.shared.didSignIn()
     }
 
     private func record(ok: Bool, at: Date) {
@@ -203,9 +220,12 @@ final class SyncAccount {
         if let session, isSignedIn {
             let token = StaticTokenSession(token: session.token)
             engine.configure(api: HttpSyncApi(baseURL: serverURL.absoluteString, token: { token.token() }), session: token)
+            library.api = HttpLibraryApi(baseURL: serverURL, token: { token.token() })
             scheduler.start()
+            library.sync()
         } else {
             engine.configure(api: nil, session: StaticTokenSession(token: ""))
+            library.api = nil
         }
         refreshPendingCount()
     }
