@@ -138,6 +138,9 @@ final class FlowCoordinator: NSObject {
     /// Two pages side by side: chosen, page by page, and the window is wide enough.
     private var twoUp: Bool { containerView.twoUp }
     private var turnOverlay: PageTurnOverlay?
+    /// While a swipe drags a page over: where the text was before the turn, to go back to if the
+    /// page falls back. The text is already on the new page under the overlay.
+    private var dragFrom: CGFloat?
     /// Page by page: the first line on the page, as a unit and a character offset into it. Text
     /// above changes height as pages finish building; this line is what stays at the top.
     private var pageAnchor: (unit: Int, offset: Int)?
@@ -289,6 +292,11 @@ final class FlowCoordinator: NSObject {
         builtLayout = layout
         scrollView.hasVerticalScroller = !paged
         scrollView.pageTurnHandler = paged ? { [weak self] forward in self?.turnPage(forward: forward) } : nil
+        scrollView.interactiveTurn = paged ? InteractiveTurn(
+            began: { [weak self] forward in self?.beginDragTurn(forward: forward) ?? false },
+            moved: { [weak self] distance in self?.moveDragTurn(distance) },
+            ended: { [weak self] flick in self?.endDragTurn(flick: flick) }
+        ) : nil
         if paged {
             if builtScale != nil { snapToLine() }
         } else {
@@ -536,27 +544,35 @@ final class FlowCoordinator: NSObject {
     }
 
     /// Turns one window forward or back (two pages in two-page mode); the next window starts
-    /// with the line this one hid. The turn is animated: the new page slides in over the old.
+    /// with the line this one hid. The turn is animated: the page curls over like paper.
     func turnPage(forward: Bool) {
-        guard isActive, controller.state.phase == .reading else { return }
+        guard let target = turnTarget(forward: forward) else { return }
+        if let overlay = beginTurn(forward: forward, { setScrollY(target) }) {
+            overlay.play(to: 1, duration: PageTurnOverlay.duration, easeInOut: true)
+        }
+        report()
+    }
+
+    /// Where the text goes for a turn forward or back, or nil when there's no page that way.
+    private func turnTarget(forward: Bool) -> CGFloat? {
+        guard isActive, controller.state.phase == .reading else { return nil }
         let b = scrollView.contentView.bounds
         var target: CGFloat
         if forward {
-            guard b.minY < maxScrollY - 0.5 else { return }
+            guard b.minY < maxScrollY - 0.5 else { return nil }
             if twoUp {
-                guard let char = mirror.nextPageCharacter, char < storage.length, let top = textView.lineTop(ofCharacter: char) else { return }
+                guard let char = mirror.nextPageCharacter, char < storage.length, let top = textView.lineTop(ofCharacter: char) else { return nil }
                 target = top - Self.pagePad
-                guard target > b.minY + 0.5 else { return }
+                guard target > b.minY + 0.5 else { return nil }
             } else {
                 target = pageTop(after: b)
             }
         } else {
-            guard b.minY > 0.5 else { return }
+            guard b.minY > 0.5 else { return nil }
             target = pageTop(before: b.minY)
             if twoUp, target > 0.5 { target = pageTop(before: target) }
         }
-        animateTurn(forward: forward) { setScrollY(target) }
-        report()
+        return target
     }
 
     /// Where the page after the one in `b` starts: the line the bottom edge hid.
@@ -581,27 +597,71 @@ final class FlowCoordinator: NSObject {
 
     // MARK: Page-turn animation
 
-    /// Runs `change` (which moves the text to another page) and animates from what was on screen
-    /// to what is now: the new page slides in over the old one, which drifts back and dims, like
-    /// a page being turned. Reduce Motion cross-fades instead.
-    private func animateTurn(forward: Bool, _ change: () -> Void) {
+    /// Runs `change` (which moves the text to another page) and lays an overlay over the view
+    /// that turns from what was on screen to what is now. It starts out showing the old page;
+    /// nil (with the change made) when there's nothing to animate in.
+    private func beginTurn(forward: Bool, _ change: () -> Void) -> PageTurnOverlay? {
         finishTurnAnimation()
-        guard containerView.window != nil, let before = containerView.snapshot() else { return change() }
+        guard containerView.window != nil, let before = containerView.snapshot() else {
+            change()
+            return nil
+        }
         change()
-        guard let after = containerView.snapshot() else { return }
-        let overlay = PageTurnOverlay(frame: containerView.bounds)
+        guard let after = containerView.snapshot() else { return nil }
+        let overlay = PageTurnOverlay(frame: containerView.bounds, from: before, to: after, forward: forward,
+                                      spread: twoUp, paper: theme.background, dark: theme.isDark,
+                                      scale: containerView.window?.backingScaleFactor ?? 2)
         containerView.addSubview(overlay, positioned: .above, relativeTo: nil)
         turnOverlay = overlay
-        overlay.run(from: before, to: after, forward: forward, shadow: theme.isDark ? 0.6 : 0.25,
-                    scale: containerView.window?.backingScaleFactor ?? 2) { [weak self, weak overlay] in
+        overlay.onFinish = { [weak self, weak overlay] in
             overlay?.removeFromSuperview()
             if let self, self.turnOverlay === overlay { self.turnOverlay = nil }
         }
+        return overlay
     }
 
+    /// A swipe started: the text moves to the next (or previous) page at once, under an overlay
+    /// whose page then follows the fingers.
+    private func beginDragTurn(forward: Bool) -> Bool {
+        guard let target = turnTarget(forward: forward) else { return false }
+        let from = scrollView.contentView.bounds.minY
+        guard beginTurn(forward: forward, { setScrollY(target) }) != nil else {
+            report() // turned without an animation
+            return false
+        }
+        dragFrom = from
+        return true
+    }
+
+    private func moveDragTurn(_ distance: CGFloat) {
+        guard dragFrom != nil, let overlay = turnOverlay else { return }
+        overlay.progress = distance / overlay.dragLength
+    }
+
+    /// The fingers lifted: a flick or a page dragged far enough finishes the turn; otherwise the
+    /// page falls back and the text returns to where it was.
+    private func endDragTurn(flick: CGFloat?) {
+        guard let from = dragFrom else { return }
+        dragFrom = nil
+        guard let overlay = turnOverlay else { return report() }
+        let commit = flick.map { $0 > 4 || ($0 > -4 && overlay.progress > 0.3) } ?? false
+        let target: CGFloat = commit ? 1 : 0
+        overlay.play(to: target, duration: 0.12 + 0.4 * abs(target - overlay.progress), easeInOut: false)
+        if commit {
+            report()
+        } else {
+            setScrollY(from)
+        }
+    }
+
+    /// Ends any turn at once, on the page it was turning to.
     private func finishTurnAnimation() {
-        turnOverlay?.removeFromSuperview()
+        turnOverlay?.stop()
         turnOverlay = nil
+        if dragFrom != nil {
+            dragFrom = nil
+            report()
+        }
     }
 
     private func report() {
@@ -959,89 +1019,281 @@ final class MirrorScrollView: NSScrollView {
 }
 
 /// Plays one page turn over the reading view, from a snapshot of the old page to one of the new,
-/// then removes itself. Input passes straight through, so the next turn can start at once.
+/// then removes itself. The page curls over like paper rolling round a cylinder: the turning
+/// sheet is cut into narrow upright strips, each lying flat, bent round the curl or face down
+/// past it, and shaded by how far it has tilted, with a soft shadow on the page it uncovers. On
+/// one page the sheet is the whole page, bound at its left edge; on two it is the right-hand page,
+/// bound at the fold, and its back is the next left-hand page. A swipe drives it through
+/// `progress`; keys and the wheel `play` it through. Reduce Motion cross-fades instead.
+/// Input passes straight through, so the next turn can start at once.
 final class PageTurnOverlay: NSView {
-    static let duration: CFTimeInterval = 0.38
+    static let duration: CFTimeInterval = 0.55
 
-    override init(frame: NSRect) {
+    /// How far the turn has gone: 0 shows the old page, 1 the new one.
+    var progress: CGFloat {
+        get { turned }
+        set {
+            turned = min(max(newValue, 0), 1)
+            render()
+        }
+    }
+    /// How far the fingers travel for a whole turn.
+    var dragLength: CGFloat { max(160, sheetWidth * 0.8) }
+    /// Called once a `play` reaches its end.
+    var onFinish: (() -> Void)?
+
+    private var turned: CGFloat = 0
+    private let forward: Bool
+    /// Where the sheet is bound: the left edge, or the fold between two pages.
+    private let spine: CGFloat
+    private let sheetWidth: CGFloat
+    private let maxRadius: CGFloat
+    private let perspective: CGFloat
+    private let shadeStrength: Float
+    private let shadowStrength: Float
+    /// One page: a touch of shade on the sheet's plain back, so it stands off the page beneath.
+    private let backTint: Float
+    private let sheet = CALayer()
+    private let edgeShadow = CAGradientLayer()
+    private var strips: [Strip] = []
+    /// Reduce Motion: the old page, fading out over the new.
+    private var fade: CALayer?
+    private var link: CADisplayLink?
+    private var animation: (from: CGFloat, to: CGFloat, start: CFTimeInterval, duration: CFTimeInterval, easeInOut: Bool)?
+    private var generation = 0
+
+    private struct Strip {
+        let layer: CATransformLayer
+        /// Where the strip starts, measured across the sheet from the spine.
+        let x: CGFloat
+        let frontShade: CALayer
+        let backShade: CALayer
+    }
+
+    init(frame: NSRect, from before: CGImage, to after: CGImage, forward: Bool, spread: Bool,
+         paper: NSColor, dark: Bool, scale: CGFloat) {
+        self.forward = forward
+        let w = frame.width, h = frame.height
+        let half = floor(w / 2)
+        spine = spread ? w - half : 0
+        sheetWidth = spread ? half : w
+        maxRadius = min(90, max(36, sheetWidth * 0.12))
+        perspective = max(w, h) * 2.2
+        shadeStrength = dark ? 0.45 : 0.28
+        shadowStrength = dark ? 0.6 : 0.32
+        backTint = spread ? 0 : 0.06
         super.init(frame: frame)
         wantsLayer = true
-        layer?.masksToBounds = true
+        guard let root = layer else { return }
+        root.masksToBounds = true
+
+        // A slice of a snapshot, `width` wide from `x` across the view.
+        func picture(_ image: CGImage, x: CGFloat, width: CGFloat) -> CALayer {
+            let l = CALayer()
+            l.frame = CGRect(x: 0, y: 0, width: width, height: h)
+            l.contents = image
+            l.contentsScale = scale
+            l.contentsGravity = .resize
+            l.contentsRect = CGRect(x: max(0, x) / w, y: 0, width: width / w, height: 1)
+            return l
+        }
+
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            root.addSublayer(picture(after, x: 0, width: w))
+            let old = picture(before, x: 0, width: w)
+            root.addSublayer(old)
+            fade = old
+            return
+        }
+
+        // The sheet turns from the earlier page to the later one: forward it starts flat on the
+        // page and ends turned over; back it starts turned over and comes down onto the page.
+        let earlier = forward ? before : after, later = forward ? after : before
+        root.addSublayer(picture(later, x: 0, width: w))
+        if spread {
+            // The left-hand page stays put until the sheet's back covers it.
+            root.addSublayer(picture(earlier, x: 0, width: spine))
+        }
+
+        edgeShadow.colors = [NSColor(white: 0, alpha: 1).cgColor, NSColor(white: 0, alpha: 0).cgColor]
+        edgeShadow.startPoint = CGPoint(x: 0, y: 0.5)
+        edgeShadow.endPoint = CGPoint(x: 1, y: 0.5)
+        edgeShadow.opacity = 0
+        root.addSublayer(edgeShadow)
+
+        sheet.frame = bounds
+        var p = CATransform3DIdentity
+        p.m34 = -1 / perspective
+        sheet.sublayerTransform = p
+        root.addSublayer(sheet)
+
+        let step = max(4, ceil(sheetWidth / 120))
+        var x: CGFloat = 0
+        while x < sheetWidth {
+            // Each strip overlaps the next by a point, so no seam shows where the curl bends.
+            let width = min(step + 1, sheetWidth - x)
+            let strip = CATransformLayer()
+            strip.bounds = CGRect(x: 0, y: 0, width: width, height: h)
+            strip.anchorPoint = CGPoint(x: 0, y: 0.5)
+            strip.position = CGPoint(x: spine + x, y: h / 2)
+
+            let front = picture(earlier, x: spine + x, width: width)
+            front.isDoubleSided = false
+            let frontShade = Self.shade(width: width, height: h)
+            front.addSublayer(frontShade)
+
+            // The back faces the other way, so it shows when the strip has turned past upright.
+            let back: CALayer
+            if spread {
+                // Lying turned over, this strip covers the left page from spine - x - width.
+                back = picture(later, x: spine - x - width, width: width)
+            } else {
+                // Plain paper, with the page's own text faintly showing through, mirrored.
+                back = CALayer()
+                back.frame = CGRect(x: 0, y: 0, width: width, height: h)
+                back.backgroundColor = paper.cgColor
+                let ghost = picture(earlier, x: spine + x, width: width)
+                ghost.transform = CATransform3DMakeScale(-1, 1, 1)
+                ghost.opacity = dark ? 0.12 : 0.08
+                back.addSublayer(ghost)
+            }
+            back.transform = CATransform3DMakeRotation(.pi, 0, 1, 0)
+            back.isDoubleSided = false
+            let backShade = Self.shade(width: width, height: h)
+            back.addSublayer(backShade)
+
+            strip.addSublayer(front)
+            strip.addSublayer(back)
+            sheet.addSublayer(strip)
+            strips.append(Strip(layer: strip, x: x, frontShade: frontShade, backShade: backShade))
+            x += step
+        }
+        render()
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
+    private static func shade(width: CGFloat, height: CGFloat) -> CALayer {
+        let l = CALayer()
+        l.frame = CGRect(x: 0, y: 0, width: width, height: height)
+        l.backgroundColor = NSColor.black.cgColor
+        l.opacity = 0
+        return l
+    }
+
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
-    func run(from before: CGImage, to after: CGImage, forward: Bool, shadow: Float, scale: CGFloat,
-             completion: @escaping @MainActor () -> Void) {
-        guard let root = layer else { return completion() }
-        let w = bounds.width
-        func page(_ image: CGImage) -> CALayer {
-            let l = CALayer()
-            l.frame = bounds
-            l.contents = image
-            l.contentsScale = scale
-            l.contentsGravity = .resize
-            return l
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // The display link holds on to this view; the fallback in `play` still finishes the turn.
+        if window == nil {
+            link?.invalidate()
+            link = nil
         }
-        let old = page(before), new = page(after)
-        // Forward: the new page slides in from the right over the old one. Back: the old page
-        // slides off to the right, uncovering the previous one.
-        let (under, over) = forward ? (old, new) : (new, old)
-        let dim = CALayer()
-        dim.frame = bounds
-        dim.backgroundColor = NSColor.black.cgColor
-        under.addSublayer(dim)
-        over.shadowColor = NSColor.black.cgColor
-        over.shadowOpacity = shadow
-        over.shadowRadius = 14
-        over.shadowOffset = .zero
-        over.shadowPath = CGPath(rect: over.bounds, transform: nil)
-        root.addSublayer(under)
-        root.addSublayer(over)
+    }
 
-        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        let timing = CAMediaTimingFunction(controlPoints: 0.25, 0.8, 0.25, 1)
+    /// Lays the sheet out for `progress`. The sheet lifts off the page at `lift` (measured from
+    /// the spine) and wraps round a cylinder of radius `r` lying on the page there: a point `s`
+    /// past the lift line sits `s / r` radians round it, and past half a turn lies face down,
+    /// heading back toward the spine. As the turn finishes the curl tightens to nothing, so the
+    /// sheet ends exactly flat, turned over (off the view, on one page) or back on its page.
+    private func render() {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        CATransaction.setAnimationDuration(reduceMotion ? 0.2 : Self.duration)
-        CATransaction.setAnimationTimingFunction(timing)
-        // Animations don't run in a window that isn't on screen, so the completion block may never
-        // come; the timer makes sure the overlay always goes away.
-        var finished = false
-        let finish = { @MainActor in
-            guard !finished else { return }
-            finished = true
-            completion()
+        defer { CATransaction.commit() }
+        if let fade {
+            fade.opacity = Float(1 - turned)
+            return
         }
-        CATransaction.setCompletionBlock { MainActor.assumeIsolated { finish() } }
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.duration + 0.15) { MainActor.assumeIsolated { finish() } }
-        func animate(_ l: CALayer, _ key: String, from: Any, to: Any) {
-            let a = CABasicAnimation(keyPath: key)
-            a.fromValue = from
-            a.toValue = to
-            l.setValue(to, forKeyPath: key)
-            l.add(a, forKey: key)
-        }
-        if reduceMotion {
-            over.shadowOpacity = 0
-            dim.opacity = 0
-            if forward {
-                animate(over, "opacity", from: 0, to: 1)
+        let c = forward ? turned : 1 - turned // how far over the sheet is
+        let lift = sheetWidth * (1 - c)
+        let r = maxRadius * sqrt(max(0, sin(.pi * c)))
+        for strip in strips {
+            let s = strip.x - lift
+            var x = strip.x, z: CGFloat = 0, angle: CGFloat = 0
+            if s <= 0 {
+                // Still flat on the page.
+            } else if r < 0.5 {
+                x = lift - s
+                angle = .pi
+            } else if s < .pi * r {
+                angle = s / r
+                x = lift + r * sin(angle)
+                z = r * (1 - cos(angle))
             } else {
-                animate(over, "opacity", from: 1, to: 0)
+                x = lift - (s - .pi * r)
+                z = 2 * r
+                angle = .pi
             }
-        } else if forward {
-            animate(over, "transform.translation.x", from: w, to: 0)
-            animate(under, "transform.translation.x", from: 0, to: -w * 0.3)
-            animate(dim, "opacity", from: 0, to: 0.18)
-        } else {
-            animate(over, "transform.translation.x", from: 0, to: w)
-            animate(under, "transform.translation.x", from: -w * 0.3, to: 0)
-            animate(dim, "opacity", from: 0.18, to: 0)
+            strip.layer.position = CGPoint(x: spine + x, y: bounds.midY)
+            strip.layer.zPosition = z
+            // Turning by -angle about the vertical axis tips the strip's far edge up toward the reader.
+            strip.layer.transform = CATransform3DMakeRotation(-angle, 0, 1, 0)
+            let shade = Float(sin(angle)) * shadeStrength
+            strip.frontShade.opacity = shade
+            strip.backShade.opacity = shade * 0.7 + backTint
         }
-        CATransaction.commit()
+
+        // A soft shadow on the uncovered page, just past the curl's outer edge.
+        let reach = sheetWidth - lift
+        guard reach > 0, r >= 0.5 else {
+            edgeShadow.opacity = 0
+            return
+        }
+        let angle = min(reach / r, .pi / 2)
+        let edge = spine + lift + r * sin(angle)
+        // Where the edge appears, raised toward the reader in perspective.
+        let mid = bounds.midX
+        let seen = mid + (edge - mid) * perspective / (perspective - r * (1 - cos(angle)))
+        let width = 18 + r * 0.6
+        edgeShadow.frame = CGRect(x: seen, y: 0, width: width, height: bounds.height)
+        edgeShadow.opacity = shadowStrength * Float(min(1, c * 5, (1 - c) * 5))
+    }
+
+    /// Animates `progress` to `target` (0 or 1), then calls `onFinish`.
+    func play(to target: CGFloat, duration: CFTimeInterval, easeInOut: Bool) {
+        animation = (turned, target, CACurrentMediaTime(), max(duration, 0.01), easeInOut)
+        if link == nil {
+            let l = displayLink(target: self, selector: #selector(step(_:)))
+            l.add(to: .main, forMode: .common)
+            link = l
+        }
+        // A window that isn't on screen gets no display-link callbacks; make sure the turn ends.
+        generation += 1
+        let g = generation
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration + 0.3) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.generation == g, self.animation != nil else { return }
+                self.progress = target
+                self.complete()
+            }
+        }
+    }
+
+    @objc private func step(_ link: CADisplayLink) {
+        guard let a = animation else { return }
+        let t = min(1, (CACurrentMediaTime() - a.start) / a.duration)
+        let eased = a.easeInOut ? (t < 0.5 ? 4 * t * t * t : 1 - pow(2 - 2 * t, 3) / 2) : 1 - pow(1 - t, 3)
+        progress = a.from + (a.to - a.from) * CGFloat(eased)
+        if t >= 1 { complete() }
+    }
+
+    private func complete() {
+        animation = nil
+        link?.invalidate()
+        link = nil
+        let done = onFinish
+        onFinish = nil
+        done?()
+    }
+
+    /// Ends the turn now and takes the overlay away, without calling `onFinish`.
+    func stop() {
+        animation = nil
+        link?.invalidate()
+        link = nil
+        onFinish = nil
+        removeFromSuperview()
     }
 }
 
