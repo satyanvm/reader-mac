@@ -280,6 +280,19 @@ final class PagesDocumentView: NSView {
     }
 }
 
+/// A page turn the reader drags with a trackpad swipe.
+struct InteractiveTurn {
+    /// The fingers started moving (true = toward the end of the book). Returns whether a turn
+    /// is now following them; false when there's no page that way or it was turned at once.
+    var began: (Bool) -> Bool
+    /// How far the fingers have moved in the turn's direction, in points (negative once they
+    /// come back past where they started).
+    var moved: (CGFloat) -> Void
+    /// The fingers lifted, still moving this fast in the turn's direction (points per event,
+    /// negative when moving back), or nil when the swipe was cancelled.
+    var ended: (CGFloat?) -> Void
+}
+
 /// A scroll view that takes keyboard focus and routes reading keys to a handler.
 final class ReaderScrollView: NSScrollView {
     var keyHandler: ((NSEvent) -> Bool)?
@@ -313,8 +326,14 @@ final class ReaderScrollView: NSScrollView {
     /// Set in page-by-page flowing text: a scroll or swipe turns one page (true = forward)
     /// instead of moving the text.
     var pageTurnHandler: ((Bool) -> Void)?
+    /// Also set in page-by-page flowing text: a trackpad swipe drags the page over with the
+    /// fingers instead of turning it all at once.
+    var interactiveTurn: InteractiveTurn?
     private var gestureDelta: CGFloat = 0
     private var gestureTurned = false
+    /// The direction of the turn the fingers are dragging, while they drag one.
+    private var dragForward: Bool?
+    private var lastDelta: CGFloat = 0
     private var lastWheelTurn: TimeInterval = 0
 
     override func scrollWheel(with event: NSEvent) {
@@ -330,13 +349,34 @@ final class ReaderScrollView: NSScrollView {
             return
         }
         if event.phase.contains(.began) || event.phase.contains(.mayBegin) {
+            if dragForward != nil {
+                // The last swipe never said it ended: let that page fall back first.
+                dragForward = nil
+                interactiveTurn?.ended(nil)
+            }
             gestureDelta = 0
             gestureTurned = false
+            lastDelta = 0
         }
         gestureDelta += delta
-        if !gestureTurned, abs(gestureDelta) > 24 {
+        if delta != 0 { lastDelta = delta }
+        if let forward = dragForward {
+            interactiveTurn?.moved(forward ? -gestureDelta : gestureDelta)
+        } else if !gestureTurned, abs(gestureDelta) > (interactiveTurn == nil ? 24 : 6) {
             gestureTurned = true
-            pageTurnHandler(gestureDelta < 0)
+            let forward = gestureDelta < 0
+            if let turn = interactiveTurn {
+                if turn.began(forward) {
+                    dragForward = forward
+                    turn.moved(forward ? -gestureDelta : gestureDelta)
+                }
+            } else {
+                pageTurnHandler(forward)
+            }
+        }
+        if event.phase.contains(.ended) || event.phase.contains(.cancelled), let forward = dragForward {
+            dragForward = nil
+            interactiveTurn?.ended(event.phase.contains(.ended) ? (forward ? -lastDelta : lastDelta) : nil)
         }
     }
 
