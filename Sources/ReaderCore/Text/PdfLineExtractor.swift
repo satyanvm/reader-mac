@@ -22,6 +22,8 @@ public enum PdfLineExtractor {
                 let text = (attributed.string as NSString).substring(with: range)
                     .replacingOccurrences(of: "\r", with: "")
                     .replacingOccurrences(of: "\n", with: "")
+                    // Images come through as attachment characters; they aren't text.
+                    .replacingOccurrences(of: "\u{FFFC}", with: "")
                 guard !text.isEmpty else { return }
                 let font = value as? NSFont
                 let (bold, italic) = styleOf(font)
@@ -32,7 +34,8 @@ public enum PdfLineExtractor {
                 }
             }
             spans = spans.compact()
-            if spans.isEmpty { continue }
+            // A scanned page is often one image "line": nothing here, so the page goes to OCR.
+            if spans.allSatisfy({ $0.text.allSatisfy(\.isWhitespace) }) { continue }
             out.append(Line(
                 spans: spans,
                 x: Float(r.minX - box.minX),

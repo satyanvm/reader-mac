@@ -42,7 +42,7 @@ public final class TextDocument: @unchecked Sendable {
     }
 
     /// Bump when the pipeline's output changes, so old cached text is rebuilt.
-    public static let cacheVersion = 3
+    public static let cacheVersion = 4
     /// Wide enough that body text is ~30px tall, which OCR reads reliably.
     static let ocrWidth = 1600
 
