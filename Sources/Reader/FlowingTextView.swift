@@ -513,7 +513,7 @@ final class FlowCoordinator: NSObject {
     }
 
     private func cover(_ view: PageCover, _ rect: NSRect) {
-        view.frame = scrollView.convert(rect, from: textView)
+        view.frame = coverFrame(rect, in: scrollView, from: textView)
         view.color = theme.background
         view.isHidden = rect.height < 0.5
     }
@@ -724,6 +724,23 @@ final class PageCover: NSView {
         color.setFill()
         bounds.intersection(dirtyRect).fill()
     }
+}
+
+/// A page cover's frame in `scrollView`, from `rect` in `textView`'s coordinates. Text view
+/// coordinates aren't pixel-aligned like the scroll view's edges, so a cover meant to reach the
+/// top or bottom of the window could stop a point short and let the next line's ascenders (or
+/// the previous line's descenders) show there. Covers that reach an edge are stretched past it,
+/// then trimmed to the scroll view.
+@MainActor
+func coverFrame(_ rect: NSRect, in scrollView: NSScrollView, from textView: NSView) -> NSRect {
+    let visible = scrollView.contentView.bounds
+    var r = rect
+    if r.minY <= visible.minY + 0.5 {
+        r.size.height += r.minY - (visible.minY - 4)
+        r.origin.y = visible.minY - 4
+    }
+    if r.maxY >= visible.maxY - 0.5 { r.size.height = visible.maxY + 4 - r.minY }
+    return scrollView.convert(r, from: textView).intersection(scrollView.bounds)
 }
 
 /// The line fragment at `y` (in `textView`'s coordinates), or nil past the end of the text.
@@ -938,7 +955,7 @@ final class MirrorPage {
     }
 
     private func cover(_ view: PageCover, _ rect: NSRect) {
-        view.frame = scrollView.convert(rect, from: textView)
+        view.frame = coverFrame(rect, in: scrollView, from: textView)
         view.color = theme.background
         view.isHidden = rect.height < 0.5
     }
