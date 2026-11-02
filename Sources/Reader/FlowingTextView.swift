@@ -147,10 +147,10 @@ final class FlowCoordinator: NSObject {
     private var applying = false
 
     /// Comfortable line length on wide windows; narrow windows use the full width minus margins.
-    static let maxTextWidth: CGFloat = 680
-    static let minMargin: CGFloat = 24
+    static let maxTextWidth: CGFloat = 720
+    static let minMargin: CGFloat = 48
     /// Space kept above the first line and below the last line of a window in page-by-page mode.
-    static let pagePad: CGFloat = 24
+    nonisolated static let pagePad: CGFloat = 40
     /// How far the top cover reaches into the first line's leading (the space a 1.3 line height
     /// adds above each line), so the previous line's descenders never peek out above it.
     static let leadingCover: CGFloat = 4
@@ -276,10 +276,10 @@ final class FlowCoordinator: NSObject {
             textView.setFrameSize(NSSize(width: width, height: textView.frame.height))
             applying = false
         }
-        let margin = max(twoUp ? Self.minMargin * 1.5 : Self.minMargin, (width - Self.maxTextWidth) / 2)
+        let margin = max(Self.minMargin, (width - Self.maxTextWidth) / 2)
         if abs(textView.textContainerInset.width - margin) > 0.5 {
             applying = true
-            textView.textContainerInset = NSSize(width: margin, height: 28)
+            textView.textContainerInset = NSSize(width: margin, height: Self.pagePad)
             applying = false
         }
     }
@@ -782,12 +782,12 @@ extension NSTextView {
     }
 }
 
-/// Holds the reading page and, in two-page mode, the right-hand page beside it with a fold
-/// between them.
+/// Holds the reading page and, in two-page mode, the right-hand page beside it with a thin
+/// line between them.
 final class FlowContainerView: NSView {
     private var primary: NSView?
     private var mirror: NSView?
-    private let fold = PageCover()
+    private let divider = PageCover()
 
     var twoUp = false {
         didSet { if twoUp != oldValue { needsLayout = true } }
@@ -796,16 +796,16 @@ final class FlowContainerView: NSView {
     func install(primary: NSView, mirror: NSView) {
         self.primary = primary
         self.mirror = mirror
-        for view in [primary, mirror, fold] { addSubview(view) }
+        for view in [primary, mirror, divider] { addSubview(view) }
+    }
+
+    func setTheme(_ theme: TextTheme) {
+        divider.color = theme.text.withAlphaComponent(theme.isDark ? 0.18 : 0.1)
     }
 
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         needsLayout = true
-    }
-
-    func setTheme(_ theme: TextTheme) {
-        fold.color = theme.isDark ? NSColor(white: 1, alpha: 0.08) : NSColor(white: 0, alpha: 0.1)
     }
 
     override func layout() {
@@ -816,17 +816,17 @@ final class FlowContainerView: NSView {
             let half = floor(b.width / 2)
             primary?.frame = NSRect(x: 0, y: 0, width: half, height: b.height)
             mirror?.frame = NSRect(x: b.width - half, y: 0, width: half, height: b.height)
-            fold.frame = NSRect(x: floor(b.width / 2) - 0.5, y: b.height * 0.05, width: 1, height: b.height * 0.9)
+            divider.frame = NSRect(x: floor(b.width / 2) - 0.5, y: 0, width: 1, height: b.height)
         } else {
             primary?.frame = b
         }
         mirror?.isHidden = !twoUp
-        fold.isHidden = !twoUp
+        divider.isHidden = !twoUp
         for case let overlay as PageTurnOverlay in subviews { overlay.frame = b }
     }
 
     /// What's on screen now, for the page-turn animation: each page's visible text with its
-    /// covers, and the fold. (The scroll views are layer-backed, so caching the container's
+    /// covers, and the line between them. (The scroll views are layer-backed, so caching the container's
     /// display alone would miss the text.)
     func snapshot() -> CGImage? {
         guard bounds.width >= 1, bounds.height >= 1 else { return nil }
@@ -859,9 +859,9 @@ final class FlowContainerView: NSView {
                 ctx.fill(convert(cover.bounds, from: cover))
             }
         }
-        if !fold.isHidden {
-            ctx.setFillColor(fold.color.cgColor)
-            ctx.fill(fold.frame)
+        if !divider.isHidden {
+            ctx.setFillColor(divider.color.cgColor)
+            ctx.fill(divider.frame)
         }
         return ctx.makeImage()
     }
@@ -1062,15 +1062,21 @@ final class PageTurnOverlay: NSView {
     }
 }
 
-/// Play Books-style typography: serif text, first-line indents, justified with hyphenation,
-/// centred semibold headings.
+/// Play Books-style typography: a book serif (Charter) at a generous size and line height,
+/// ragged right, with space between paragraphs rather than indents, and quiet centred headings.
 struct FlowStyle {
     let scale: CGFloat
     let theme: TextTheme
 
-    var bodySize: CGFloat { 18 * scale }
+    var bodySize: CGFloat { 20 * scale }
 
     private func font(size: CGFloat, bold: Bool, italic: Bool, weight: NSFont.Weight = .regular) -> NSFont {
+        var traits: NSFontTraitMask = []
+        if bold || weight >= .semibold { traits.insert(.boldFontMask) }
+        if italic { traits.insert(.italicFontMask) }
+        if let charter = NSFontManager.shared.font(withFamily: "Charter", traits: traits, weight: 5, size: size) {
+            return charter
+        }
         let base = NSFont.systemFont(ofSize: size, weight: bold ? .bold : weight)
         var descriptor = base.fontDescriptor.withDesign(.serif) ?? base.fontDescriptor
         if italic { descriptor = descriptor.withSymbolicTraits(descriptor.symbolicTraits.union(.italic)) }
@@ -1096,27 +1102,38 @@ struct FlowStyle {
             }
         case .blocks(let blocks, let chapterStart):
             for (i, block) in blocks.enumerated() {
-                out.append(render(block, epub: epub, extraSpaceBefore: chapterStart && i == 0 ? 48 : 0))
+                out.append(render(block, book: book, epub: epub, extraSpaceBefore: chapterStart && i == 0 ? 48 : 0))
             }
             if blocks.isEmpty { out.append(NSAttributedString(string: "\n")) }
         }
         return out
     }
 
-    private func render(_ block: Block, epub: EpubBook?, extraSpaceBefore: CGFloat) -> NSAttributedString {
+    /// An EPUB image by its path in the book, or a PDF figure cut out of its page.
+    private func image(_ path: String, book: PdfBook?, epub: EpubBook?) -> NSImage? {
+        if let figure = PdfImageExtractor.parse(path) {
+            guard let page = book?.page(figure.page),
+                  let cg = PdfImageExtractor.render(page, rect: figure.rect, scale: 3) else { return nil }
+            // Sized in points, so a figure appears at its printed size (narrower than the column if it was).
+            return NSImage(cgImage: cg, size: figure.rect.size)
+        }
+        return epub?.imageBytes(path).flatMap(NSImage.init(data:))
+    }
+
+    private func render(_ block: Block, book: PdfBook?, epub: EpubBook?, extraSpaceBefore: CGFloat) -> NSAttributedString {
         switch block.kind {
         case .image:
-            guard let path = block.image, let data = epub?.imageBytes(path), let image = NSImage(data: data) else {
+            guard let path = block.image, let image = image(path, book: book, epub: epub) else {
                 return NSAttributedString(string: "")
             }
             return attachment(image, spacing: 12 + extraSpaceBefore)
         case .heading:
             let p = NSMutableParagraphStyle()
             p.alignment = .center
-            p.lineHeightMultiple = 1.15
-            p.paragraphSpacingBefore = 28 * scale + extraSpaceBefore
-            p.paragraphSpacing = 14 * scale
-            return spans(block.spans, size: bodySize * 1.25, weight: .semibold, paragraph: p)
+            p.lineHeightMultiple = 1.25
+            p.paragraphSpacingBefore = 32 * scale + extraSpaceBefore
+            p.paragraphSpacing = 22 * scale
+            return spans(block.spans, size: bodySize * 1.2, weight: .regular, paragraph: p)
         case .note:
             let p = NSMutableParagraphStyle()
             p.alignment = .natural
@@ -1128,11 +1145,11 @@ struct FlowStyle {
             return note
         case .paragraph:
             let p = NSMutableParagraphStyle()
-            p.alignment = .justified
+            p.alignment = .natural
             p.lineHeightMultiple = 1.3
-            p.firstLineHeadIndent = block.continuation ? 0 : bodySize * 1.6
             p.paragraphSpacingBefore = extraSpaceBefore
-            p.hyphenationFactor = 0.9
+            p.paragraphSpacing = bodySize * 0.9
+            p.hyphenationFactor = 0.3
             return spans(block.spans, size: bodySize, weight: .regular, paragraph: p)
         }
     }
@@ -1172,7 +1189,12 @@ final class FitWidthImageCell: NSTextAttachmentCell {
                             glyphPosition position: NSPoint, characterIndex charIndex: Int) -> NSRect {
         guard let image, image.size.width > 0 else { return .zero }
         let maxWidth = max(1, lineFrag.width - textContainer.lineFragmentPadding * 2)
-        let width = min(maxWidth, image.size.width)
+        var width = min(maxWidth, image.size.width)
+        // Never taller than a page, so a whole page image is seen at once, not cut at the bottom.
+        if let visible = textContainer.textView?.enclosingScrollView?.contentSize.height, visible > 200 {
+            let maxHeight = visible - FlowCoordinator.pagePad * 2 - 40
+            width = min(width, maxHeight * image.size.width / image.size.height)
+        }
         return NSRect(x: 0, y: 0, width: width, height: width * image.size.height / image.size.width)
     }
 

@@ -1,9 +1,16 @@
+import AppKit
 import Foundation
 import ReaderCore
 
-/// The Reader account on this Mac. Signing in (email + password with an emailed code, or Apple /
-/// Google) gets a session from the sync server; every device signed in to the same account keeps
+/// The Reader account on this Mac. Signing in (on the website, which hands the sign-in back to the
+/// app; or here with email + password and an emailed code, or Google) gets a session from the sync
+/// server; every device signed in to the same account keeps
 /// the same reading positions. Signing in or out reconfigures the running sync engine.
+///
+/// Sync is part of Pro: signed in without Pro, the account is remembered but nothing syncs, and
+/// Settings offers Pro. Whether the account has Pro is asked of the server at launch, on sign-in,
+/// on coming back to the app and after a checkout; the last answer is kept so an offline launch
+/// still syncs once the network is back.
 ///
 /// The server's address is built into the app (`ReaderSyncServer` in Info.plist, set by
 /// scripts/build-app.sh), so people only ever enter their email.
@@ -32,8 +39,19 @@ final class SyncAccount {
     /// The last library sync's problem, if it had one (a book too large to upload, no network).
     private(set) var libraryError: String?
     private(set) var isSyncingLibrary = false
+    /// A sign-in started in the browser, waiting for the website to send the person back.
+    private(set) var webSignIn: WebSignIn?
+    private(set) var webSignInError: String?
+    /// The server's last word on Pro; nil until it has answered once for this account.
+    private(set) var billing: AccountApi.Billing?
+    private(set) var billingError: String?
+    /// A checkout is open in the browser; Pro is checked every few seconds until it arrives.
+    private(set) var awaitingPurchase = false
 
     @ObservationIgnored let serverURL: URL
+    /// The website whose /app page signs the app in.
+    @ObservationIgnored let websiteURL: URL
+    @ObservationIgnored private let webSignInFile: URL
     @ObservationIgnored private let api: AccountApi
     @ObservationIgnored private let file: URL
     @ObservationIgnored private let engine: SyncEngine
@@ -41,10 +59,17 @@ final class SyncAccount {
     @ObservationIgnored private let positions: ReadingPositionRepository
     @ObservationIgnored private let library: LibrarySync
     @ObservationIgnored private var session: AccountSessionInfo?
+    /// While signed in: the library and every book's place catch up every 15 minutes.
+    @ObservationIgnored private var periodic: Timer?
     /// The password typed at sign-up, kept in memory only until the code is confirmed.
     @ObservationIgnored private var pendingPassword: String?
+    @ObservationIgnored private var purchaseWatch: Task<Void, Never>?
+    private static let proKey = "account.pro"
 
     var isSignedIn: Bool { if case .signedIn = stage { return true }; return false }
+
+    /// Signed in with Pro: books and places sync. Before the server has answered, the last answer.
+    var isPro: Bool { isSignedIn && (billing?.pro ?? UserDefaults.standard.bool(forKey: Self.proKey)) }
 
     var email: String? {
         switch stage {
@@ -56,6 +81,14 @@ final class SyncAccount {
     init(libraryDir: URL, engine: SyncEngine, scheduler: SyncScheduler, positions: ReadingPositionRepository, library: LibrarySync) {
         file = libraryDir.appendingPathComponent("sync-account.json")
         serverURL = Self.configuredServer()
+        websiteURL = Self.configured(env: "READER_WEBSITE", defaultsKey: "web.baseUrl", plist: "ReaderWebsite",
+                                     fallback: "https://readserene.site")
+        // Kept on disk: the link back from the browser can be what launches the app.
+        webSignInFile = libraryDir.appendingPathComponent("web-sign-in.json")
+        if let data = try? Data(contentsOf: webSignInFile), let pending = try? JSONDecoder().decode(WebSignIn.self, from: data),
+           !pending.isExpired() {
+            webSignIn = pending
+        }
         api = AccountApi(baseURL: serverURL)
         self.engine = engine
         self.scheduler = scheduler
@@ -84,28 +117,82 @@ final class SyncAccount {
             self.isSyncingLibrary = false
             self.libraryError = error
             if error == "unauthorized" { engine.onUnauthorized?() }
+            if error == "pro_required" {
+                self.libraryError = nil
+                Task { await self.refreshBilling() }
+            }
         }
         apply()
         Task { await loadProviders() }
+        Task { await refreshBilling() }
     }
 
     /// The sync server: READER_SYNC_BASE_URL, then the `sync.baseUrl` default, then the address
     /// built into the app.
     private static func configuredServer() -> URL {
+        configured(env: "READER_SYNC_BASE_URL", defaultsKey: "sync.baseUrl", plist: "ReaderSyncServer",
+                   fallback: "https://reader-sync.satyanarayanv2050.workers.dev")
+    }
+
+    private static func configured(env: String, defaultsKey: String, plist: String, fallback: String) -> URL {
         let candidates = [
-            ProcessInfo.processInfo.environment["READER_SYNC_BASE_URL"],
-            UserDefaults.standard.string(forKey: "sync.baseUrl"),
-            Bundle.main.object(forInfoDictionaryKey: "ReaderSyncServer") as? String,
-            "https://reader-sync.satyanarayanv2050.workers.dev",
+            ProcessInfo.processInfo.environment[env],
+            UserDefaults.standard.string(forKey: defaultsKey),
+            Bundle.main.object(forInfoDictionaryKey: plist) as? String,
         ]
         for c in candidates {
             if let c, !c.isEmpty, let url = URL(string: c) { return url }
         }
-        return URL(string: "https://reader-sync.satyanarayanv2050.workers.dev")!
+        return URL(string: fallback)!
     }
 
     func loadProviders() async {
         if let p = try? await api.providers() { providers = p }
+    }
+
+    // MARK: On the website
+
+    /// Opens the website to sign in or create an account; it sends the browser back to the app
+    /// with a code (`handleLink`).
+    func beginWebSignIn(_ mode: WebSignIn.Mode) {
+        let pending = WebSignIn(mode: mode)
+        webSignIn = pending
+        webSignInError = nil
+        if let data = try? JSONEncoder().encode(pending) {
+            try? data.write(to: webSignInFile, options: [.atomic])
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: webSignInFile.path)
+        }
+        NSWorkspace.shared.open(pending.url(website: websiteURL))
+    }
+
+    /// Opens the same page again (the tab was closed, or went to the wrong browser window).
+    func reopenWebSignIn() {
+        guard let webSignIn else { return }
+        NSWorkspace.shared.open(webSignIn.url(website: websiteURL))
+    }
+
+    func cancelWebSignIn() {
+        webSignIn = nil
+        webSignInError = nil
+        try? FileManager.default.removeItem(at: webSignInFile)
+    }
+
+    /// A readserene:// link: the website handing back a sign-in.
+    func handleLink(_ url: URL) {
+        guard WebSignIn.isCallback(url) else { return }
+        guard let pending = webSignIn, !pending.isExpired(), let code = pending.code(from: url) else {
+            // Not from the sign-in started here (an old tab, or a link from somewhere else).
+            if !isSignedIn { webSignInError = "That sign-in link isn't for this Mac, or it has expired. Sign in again." }
+            return
+        }
+        cancelWebSignIn()
+        Task {
+            do {
+                signedIn(try await api.exchangeAppCode(code, verifier: pending.verifier))
+            } catch {
+                webSignInError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            }
+        }
     }
 
     // MARK: Email and password
@@ -172,6 +259,11 @@ final class SyncAccount {
         if let token = session?.token { Task { [api] in await api.signOut(token: token) } }
         session = nil
         stage = .signedOut
+        billing = nil
+        billingError = nil
+        purchaseWatch?.cancel()
+        awaitingPurchase = false
+        UserDefaults.standard.removeObject(forKey: Self.proKey)
         save()
         apply()
         library.reset()
@@ -181,12 +273,65 @@ final class SyncAccount {
     }
 
     /// Push now (pending local positions), check the server for the open books, and bring the
-    /// library up to date both ways.
+    /// library and every book's place up to date both ways. Runs on its own (sign-in, launch,
+    /// coming back to the app, every 15 minutes); "Retry" after a failed library sync calls it too.
     func syncNow() {
         guard isSignedIn else { return }
+        guard isPro else {
+            Task { await refreshBilling() }
+            return
+        }
         isSyncing = true
         scheduler.requestSync(after: 0)
         AppGraph.shared.refreshOpenReaders()
+    }
+
+    // MARK: Pro
+
+    /// Asks the server whether the account has Pro, and turns sync on or off to match.
+    func refreshBilling() async {
+        guard isSignedIn, let token = session?.token else { return }
+        let wasPro = isPro
+        do {
+            let b = try await api.billing(token: token)
+            guard isSignedIn, session?.token == token else { return }
+            billing = b
+            billingError = nil
+            UserDefaults.standard.set(b.pro, forKey: Self.proKey)
+        } catch let e as AccountError where e.code == "unauthorized" {
+            engine.onUnauthorized?()
+            return
+        } catch {
+            billingError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            return
+        }
+        if isPro != wasPro {
+            apply()
+            if isPro { syncNow() }
+        }
+        if isPro {
+            purchaseWatch?.cancel()
+            awaitingPurchase = false
+        }
+    }
+
+    /// Opens the payment page for `plan` in the browser and watches for Pro to arrive.
+    func buyPro(plan: String) async throws {
+        guard let token = session?.token else { return }
+        let url = try await api.checkout(plan: plan, token: token)
+        NSWorkspace.shared.open(url)
+        awaitingPurchase = true
+        purchaseWatch?.cancel()
+        // Payment webhooks usually land within seconds; give up quietly after 15 minutes
+        // (coming back to the app checks again).
+        purchaseWatch = Task { [weak self] in
+            for _ in 0..<180 {
+                try? await Task.sleep(for: .seconds(5))
+                guard let self, !Task.isCancelled, self.awaitingPurchase else { return }
+                await self.refreshBilling()
+            }
+            self?.awaitingPurchase = false
+        }
     }
 
     func refreshPendingCount() {
@@ -200,8 +345,10 @@ final class SyncAccount {
         save()
         apply()
         // Reading done on this Mac before signing in goes up now, open books catch up, and the
-        // account's books come in while the library is on screen.
+        // account's books come in while the library is on screen (with Pro; refreshBilling turns
+        // sync on when the server confirms it).
         syncNow()
+        Task { await refreshBilling() }
         AppGraph.shared.didSignIn()
     }
 
@@ -217,15 +364,22 @@ final class SyncAccount {
     }
 
     private func apply() {
-        if let session, isSignedIn {
+        if let session, isPro {
             let token = StaticTokenSession(token: session.token)
             engine.configure(api: HttpSyncApi(baseURL: serverURL.absoluteString, token: { token.token() }), session: token)
             library.api = HttpLibraryApi(baseURL: serverURL, token: { token.token() })
             scheduler.start()
             library.sync()
+            if periodic == nil {
+                periodic = Timer.scheduledTimer(withTimeInterval: 15 * 60, repeats: true) { _ in
+                    MainActor.assumeIsolated { AppGraph.shared.refreshOpenReaders() }
+                }
+            }
         } else {
             engine.configure(api: nil, session: StaticTokenSession(token: ""))
             library.api = nil
+            periodic?.invalidate()
+            periodic = nil
         }
         refreshPendingCount()
     }

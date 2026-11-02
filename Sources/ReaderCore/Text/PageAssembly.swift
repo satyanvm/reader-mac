@@ -12,13 +12,32 @@ public enum PageAssembly {
     public static func stripRunningLines(_ page: [Line], neighbours: [[Line]]) -> [Line] {
         let lines = page.filter { !$0.text.isBlank }
         if lines.count < 2 { return lines }
-        let tops = Set(neighbours.compactMap { n in n.first { !$0.text.isBlank }.map(key) })
-        let bottoms = Set(neighbours.compactMap { n in n.last { !$0.text.isBlank }.map(key) })
+        let tops = Set(neighbours.flatMap { n in topRow(n.filter { !$0.text.isBlank }).map(key) })
+        let bottoms = Set(neighbours.flatMap { n in bottomRow(n.filter { !$0.text.isBlank }).map(key) })
         var out = lines
-        if isRunning(out[0], tops) { out.removeFirst() }
-        if out.count > 1, isRunning(out[out.count - 1], bottoms) { out.removeLast() }
+        // A header can be several pieces on one row ("ALL AND EVERYTHING ... 452" read by OCR as
+        // two lines). It's running when one piece repeats; then its whole row goes.
+        if isRunning(out[0], tops) || topRow(out).contains(where: { isRunning($0, tops) && !isNumber($0) }) {
+            out.removeFirst(min(out.count - 1, topRow(out).count))
+        }
+        if out.count > 1, isRunning(out[out.count - 1], bottoms) || bottomRow(out).contains(where: { isRunning($0, bottoms) && !isNumber($0) }) {
+            out.removeLast(min(out.count - 1, bottomRow(out).count))
+        }
         return out
     }
+
+    /// The first lines that share the first line's row.
+    private static func topRow(_ lines: [Line]) -> ArraySlice<Line> {
+        guard let first = lines.first else { return [] }
+        return lines.prefix { abs($0.y - first.y) < max($0.fontSize, first.fontSize) * 0.5 }
+    }
+
+    private static func bottomRow(_ lines: [Line]) -> ArraySlice<Line> {
+        guard let last = lines.last else { return [] }
+        return lines.reversed().prefix { abs($0.y - last.y) < max($0.fontSize, last.fontSize) * 0.5 }.reversed()[...]
+    }
+
+    private static func isNumber(_ line: Line) -> Bool { key(line) == "#" }
 
     /// Final blocks for a page given the reflowed blocks of the page before, this one and the one
     /// after. A paragraph that continues across a break is moved whole onto the earlier page,
@@ -30,7 +49,7 @@ public enum PageAssembly {
         var out = page
         // Footnotes sit at the end of a page; paragraphs continue around them.
         let mainCount = page.filter { $0.kind != .note }.count
-        let continuesPrev = prev != nil && Reflow.continues(prev!.last { $0.kind != .note }, page.first,
+        let continuesPrev = prev != nil && Reflow.continues(prev!.last { $0.kind != .note && $0.kind != .image }, page.first,
                                                             nextPageUsesIndents: usesIndents(page))
         if continuesPrev && mainCount >= 2 {
             out.removeFirst()
@@ -38,7 +57,7 @@ public enum PageAssembly {
             out[0].continuation = true
         }
         if let next, next.filter({ $0.kind != .note }).count >= 2,
-           let last = out.lastIndex(where: { $0.kind != .note }),
+           let last = out.lastIndex(where: { $0.kind != .note && $0.kind != .image }),
            Reflow.continues(out[last], next.first, nextPageUsesIndents: usesIndents(next)) {
             out[last] = Reflow.merge(out[last], next[0])
         }

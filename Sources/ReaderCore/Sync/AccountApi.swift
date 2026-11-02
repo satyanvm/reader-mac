@@ -97,6 +97,44 @@ public struct AccountApi: Sendable {
         try sessionInfo(try await call("POST", "v1/auth/\(provider)", ["idToken": idToken]))
     }
 
+    /// Trades the one-time code the website handed back (signing in there) and the secret the
+    /// app made before opening the site for a session of this device's own.
+    public func exchangeAppCode(_ code: String, verifier: String) async throws -> AccountSessionInfo {
+        try sessionInfo(try await call("POST", "v1/auth/app/token", ["code": code, "verifier": verifier]))
+    }
+
+    /// Whether the account has Pro (sync is part of Pro), and which plans can be bought.
+    public struct Billing: Decodable, Equatable, Sendable {
+        public var pro: Bool
+        public var plan: String?
+        public var status: String?
+        /// Milliseconds since 1970.
+        public var renewsAt: Double?
+        public var endsAt: Double?
+        public var plans: [String]
+
+        public init(pro: Bool, plan: String? = nil, status: String? = nil, renewsAt: Double? = nil, endsAt: Double? = nil, plans: [String] = []) {
+            self.pro = pro
+            self.plan = plan
+            self.status = status
+            self.renewsAt = renewsAt
+            self.endsAt = endsAt
+            self.plans = plans
+        }
+    }
+
+    public func billing(token: String) async throws -> Billing {
+        try JSONDecoder().decode(Billing.self, from: try await call("GET", "v1/billing", token: token))
+    }
+
+    /// A checkout page for `plan` ("monthly" or "yearly"), tied to this account; open it in the browser.
+    public func checkout(plan: String, token: String) async throws -> URL {
+        struct Body: Decodable { var url: String }
+        let body = try JSONDecoder().decode(Body.self, from: try await call("POST", "v1/billing/checkout", ["plan": plan], token: token))
+        guard let url = URL(string: body.url) else { throw AccountError(code: "bad_url", message: "The payment page couldn't be opened.") }
+        return url
+    }
+
     public func signOut(token: String) async {
         _ = try? await call("POST", "v1/auth/signout", [:], token: token)
     }

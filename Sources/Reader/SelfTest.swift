@@ -54,6 +54,11 @@ enum SelfTest {
         await accountSteps(log: url)
         if await !waitFor({ graph.openMainWindow != nil }) { trace("selftest: library window never appeared") }
         if let book = ProcessInfo.processInfo.environment["READER_SELFTEST_IMPORT"], !book.isEmpty {
+            // The scenarios start on original pages; new books otherwise open in flowing text.
+            let known = Set(((try? graph.documents.all()) ?? []).map(\.id))
+            if let doc = try? graph.documents.importFile(URL(fileURLWithPath: book)), !known.contains(doc.id) {
+                try? graph.documents.setReadingMode(doc.id, .pages)
+            }
             graph.open(urls: [URL(fileURLWithPath: book)])
         }
         if ProcessInfo.processInfo.environment["READER_SELFTEST_WAIT_SYNC"] == "1" {

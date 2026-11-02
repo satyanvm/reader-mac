@@ -92,14 +92,18 @@ struct AccountButton: View {
 
     var body: some View {
         SettingsLink {
-            if let email = account.isSignedIn ? account.email : nil {
+            if account.isSignedIn && !account.isPro {
+                Label("Get Pro to Sync", systemImage: "sparkles")
+            } else if let email = account.isSignedIn ? account.email : nil {
                 Label(email, systemImage: "person.crop.circle.badge.checkmark")
             } else {
                 Label("Sign In to Sync", systemImage: "person.crop.circle")
             }
         }
         .labelStyle(.titleAndIcon)
-        .help(account.isSignedIn ? "Your place syncs to your other devices" : "Sign in to keep your place on all your devices")
+        .help(account.isPro ? "Your place syncs to your other devices"
+              : account.isSignedIn ? "Signed in as \(account.email ?? ""). Sync is part of Readserene Pro."
+              : "Sign in to keep your place on all your devices")
     }
 }
 
@@ -108,7 +112,7 @@ struct LibrarySyncStatus: View {
     private let account = AppGraph.shared.account
 
     var body: some View {
-        if account.isSignedIn, account.isSyncingLibrary || account.libraryError != nil {
+        if account.isPro, account.isSyncingLibrary || account.libraryError != nil {
             HStack(spacing: 8) {
                 if account.isSyncingLibrary {
                     ProgressView().controlSize(.small)

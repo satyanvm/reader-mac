@@ -84,6 +84,7 @@ struct ReaderContent: View {
         .frame(minWidth: 420, minHeight: 360)
         .navigationTitle(state.title.isEmpty ? "Reader" : state.title)
         .toolbar { ReaderToolbar(model: model, state: state) }
+        .modifier(ToolbarHidesInFullScreen())
         .focusedSceneValue(\.reader, model)
         .preferredColorScheme(theme.isDark ? .dark : .light)
         .onDisappear { model.close() }
@@ -93,7 +94,7 @@ struct ReaderContent: View {
     private func content(_ state: ReaderUiState, theme: TextTheme) -> some View {
         switch state.phase {
         case .loading:
-            ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            LoadingView(theme: theme)
         case .failed(let message):
             ContentUnavailableView("Can't open this book", systemImage: "exclamationmark.triangle", description: Text(message))
         default:
@@ -107,6 +108,18 @@ struct ReaderContent: View {
                     PagesView(model: model, book: pdf, state: state, theme: theme, spread: model.spread).id("pages")
                 }
             }
+        }
+    }
+}
+
+/// Full screen is for reading: the toolbar slides away and comes back when the pointer reaches
+/// the top of the screen.
+private struct ToolbarHidesInFullScreen: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content.windowToolbarFullScreenVisibility(.onHover)
+        } else {
+            content
         }
     }
 }
@@ -214,14 +227,32 @@ struct ProgressBar: View {
                 }
             )
             .disabled(pageCount <= 1)
-            Text("\(unit)\(shown + 1) / \(pageCount)")
-                .monospacedDigit()
-                .foregroundStyle(Color(nsColor: theme.text))
-                .frame(minWidth: 110, alignment: .trailing)
+            HStack(spacing: 4) {
+                turnButton(forward: false)
+                Text("\(unit)\(shown + 1) / \(pageCount)")
+                    .monospacedDigit()
+                    .foregroundStyle(Color(nsColor: theme.text))
+                    .frame(minWidth: 110)
+                turnButton(forward: true)
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .background(Color(nsColor: theme.background))
+    }
+
+    private func turnButton(forward: Bool) -> some View {
+        Button { model.turnPage(forward: forward) } label: {
+            Image(systemName: forward ? "chevron.right" : "chevron.left")
+                .font(.system(size: 14, weight: .semibold))
+                .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(Color(nsColor: theme.text))
+        // A page of flowing text can fill several screens, so only original pages know they're at an end.
+        .disabled(!model.isTextMode && (forward ? pageIndex >= pageCount - 1 : pageIndex <= 0))
+        .help(forward ? "Next page (⌥⌘↓)" : "Previous page (⌥⌘↑)")
     }
 }
 

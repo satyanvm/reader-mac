@@ -1,6 +1,7 @@
 import AppKit
 import CoreText
 import Foundation
+import PDFKit
 import Testing
 @testable import ReaderCore
 
@@ -146,6 +147,116 @@ func bookPage(_ n: Int, _ paragraphs: [String]...) -> [PdfText] {
         try FileManager.default.removeItem(at: dir.appendingPathComponent("text-test"))
         struct NoText: Ocr { func lines(_ image: CGImage) throws -> [Line] { [] } }
         #expect(await textDocument(url, pages: 2, ocr: NoText()).page(1).isEmpty, "a figure page stays an image")
+    }
+
+    @Test func textFromTheFallbackRecognizerIsNotCached() async throws {
+        let url = dir.appendingPathComponent("scan-degraded.pdf")
+        makePdf([[], []], to: url)
+        struct Fallback: Ocr {
+            let degraded: Bool
+            func lines(_ image: CGImage) throws -> [Line] { try recognize(image).lines }
+            func recognize(_ image: CGImage) throws -> OcrResult {
+                OcrResult(lines: [Line(spans: [Span(degraded ? "Misrcad tcxt." : "Read text.")], x: 100, endX: 400, y: 200, fontSize: 30)],
+                          degraded: degraded)
+            }
+        }
+        let first = await textDocument(url, pages: 2, ocr: Fallback(degraded: true)).page(0)
+        #expect(first.blocks.first?.text == "Misrcad tcxt.", "shown for now")
+        let again = await textDocument(url, pages: 2, ocr: Fallback(degraded: false)).page(0)
+        #expect(again.blocks.first?.text == "Read text.", "read again next time, not served from the cache")
+    }
+
+    @Test func figuresStayBetweenTheirParagraphs() async throws {
+        let url = dir.appendingPathComponent("figure.pdf")
+        var box = CGRect(x: 0, y: 0, width: 612, height: 792)
+        let ctx = CGContext(url as CFURL, mediaBox: &box, nil)!
+        ctx.beginPDFPage(nil)
+        func text(_ s: String, x: CGFloat, y: CGFloat) {
+            let font = CTFontCreateWithName("Times-Roman" as CFString, 12, nil)
+            ctx.textPosition = CGPoint(x: x, y: 792 - y)
+            CTLineDraw(CTLineCreateWithAttributedString(NSAttributedString(string: s, attributes: [.font: font])), ctx)
+        }
+        text("Before the figure there is a paragraph of ordinary text that", x: 90, y: 100)
+        text("ends here.", x: 72, y: 115)
+        let bmp = CGContext(data: nil, width: 200, height: 100, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+        bmp.setFillColor(CGColor(red: 0.8, green: 0.1, blue: 0.1, alpha: 1))
+        bmp.fill(CGRect(x: 0, y: 0, width: 200, height: 100))
+        ctx.draw(bmp.makeImage()!, in: CGRect(x: 156, y: 792 - 340, width: 300, height: 200)) // y 140...340 from the top
+        text("Fig. 1", x: 280, y: 300) // a label drawn on the figure
+        text("After the figure the text goes on with another paragraph, and", x: 90, y: 370)
+        text("finishes.", x: 72, y: 385)
+        ctx.endPDFPage()
+        ctx.closePDF()
+
+        let page = await textDocument(url, pages: 1).page(0)
+        #expect(page.blocks.map(\.kind) == [.paragraph, .image, .paragraph], "\(page.blocks)")
+        #expect(!page.blocks.contains { $0.text.contains("Fig. 1") }, "the label is part of the image")
+        let figure = try #require(page.blocks[1].image.flatMap(PdfImageExtractor.parse))
+        #expect(figure.page == 0)
+        #expect(abs(figure.rect.minY - 140) < 1 && abs(figure.rect.height - 200) < 1 && abs(figure.rect.minX - 156) < 1, "\(figure.rect)")
+        let doc = try #require(PDFDocument(url: url)?.page(at: 0))
+        let image = try #require(PdfImageExtractor.render(doc, rect: figure.rect, scale: 1))
+        #expect(image.width == 300 && image.height == 200)
+    }
+
+    @Test func aDiagramDrawnWithLinesIsCutOutWithItsLabels() async throws {
+        let url = dir.appendingPathComponent("diagram.pdf")
+        var box = CGRect(x: 0, y: 0, width: 612, height: 792)
+        let ctx = CGContext(url as CFURL, mediaBox: &box, nil)!
+        ctx.beginPDFPage(nil)
+        func text(_ s: String, x: CGFloat, y: CGFloat, size: CGFloat = 12) {
+            let font = CTFontCreateWithName("Times-Roman" as CFString, size, nil)
+            ctx.textPosition = CGPoint(x: x, y: 792 - y)
+            CTLineDraw(CTLineCreateWithAttributedString(NSAttributedString(string: s, attributes: [.font: font])), ctx)
+        }
+        text("Before the diagram there is a paragraph of ordinary text that", x: 90, y: 100)
+        text("ends here.", x: 72, y: 115)
+        // Two boxes joined by an arrow, all vector paths, from y 150 to 300 (from the top).
+        ctx.setStrokeColor(gray: 0, alpha: 1)
+        ctx.stroke(CGRect(x: 150, y: 792 - 220, width: 100, height: 70))
+        ctx.stroke(CGRect(x: 350, y: 792 - 300, width: 100, height: 70))
+        ctx.move(to: CGPoint(x: 250, y: 792 - 185)); ctx.addLine(to: CGPoint(x: 350, y: 792 - 265)); ctx.strokePath()
+        ctx.move(to: CGPoint(x: 340, y: 792 - 255)); ctx.addLine(to: CGPoint(x: 350, y: 792 - 265)); ctx.strokePath()
+        text("Duck", x: 185, y: 190, size: 9)
+        text("quack()", x: 380, y: 270, size: 9)
+        text("a label beside it", x: 456, y: 290, size: 8)
+        text("After the diagram the text goes on with another paragraph, and", x: 90, y: 340)
+        text("finishes.", x: 72, y: 355)
+        ctx.endPDFPage()
+        ctx.closePDF()
+
+        let page = await textDocument(url, pages: 1).page(0)
+        #expect(page.blocks.map(\.kind) == [.paragraph, .image, .paragraph], "\(page.blocks)")
+        let words = page.blocks.map(\.text).joined(separator: " ")
+        #expect(!words.contains("Duck") && !words.contains("quack") && !words.contains("label"), "labels are part of the image")
+        let figure = try #require(page.blocks[1].image.flatMap(PdfImageExtractor.parse))
+        #expect(figure.rect.minX <= 150 && figure.rect.maxX >= 500 && figure.rect.minY <= 150 && figure.rect.maxY >= 300, "\(figure.rect)")
+    }
+
+    @Test func aPicturePageInATypesetBookIsShownAsItIs() async throws {
+        let url = dir.appendingPathComponent("cover.pdf")
+        var box = CGRect(x: 0, y: 0, width: 612, height: 792)
+        let ctx = CGContext(url as CFURL, mediaBox: &box, nil)!
+        ctx.beginPDFPage(nil) // a cover: one picture, no text
+        let bmp = CGContext(data: nil, width: 120, height: 160, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+        bmp.setFillColor(CGColor(red: 0.1, green: 0.3, blue: 0.6, alpha: 1))
+        bmp.fill(CGRect(x: 0, y: 0, width: 120, height: 160))
+        ctx.draw(bmp.makeImage()!, in: box)
+        ctx.endPDFPage()
+        ctx.beginPDFPage(nil)
+        let font = CTFontCreateWithName("Times-Roman" as CFString, 12, nil)
+        ctx.textPosition = CGPoint(x: 72, y: 700)
+        CTLineDraw(CTLineCreateWithAttributedString(NSAttributedString(string: "Chapter one begins.", attributes: [.font: font])), ctx)
+        ctx.endPDFPage()
+        ctx.closePDF()
+
+        struct NoOcr: Ocr {
+            func lines(_ image: CGImage) throws -> [Line] { Issue.record("a picture page isn't read"); return [] }
+        }
+        let page = await textDocument(url, pages: 2, ocr: NoOcr()).page(0)
+        #expect(page.blocks.map(\.kind) == [.image], "\(page.blocks)")
     }
 
     @Test func visionReadsAScannedPage() async throws {

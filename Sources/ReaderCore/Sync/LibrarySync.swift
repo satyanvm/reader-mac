@@ -107,6 +107,7 @@ public struct HttpLibraryApi: LibraryApi {
     private func check(_ data: Data, _ response: URLResponse) throws {
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
         if code == 401 { throw SyncUnauthorizedError() }
+        if code == 402 { throw SyncProRequiredError() }
         if code == 413 { throw SyncUnavailableError("too large to sync (over 100 MB)") }
         guard (200..<300).contains(code) else { throw SyncUnavailableError("HTTP \(code) from the library") }
     }
@@ -127,6 +128,9 @@ public final class LibrarySync {
     /// Called when a sync starts, and after each run: nil on success, otherwise what went wrong.
     public var onStart: (() -> Void)?
     public var onResult: ((String?) -> Void)?
+    /// Called at the end of each pass, once the books here match the account's: the place to
+    /// bring every book's reading position up to date.
+    public var afterSync: (() async -> Void)?
 
     private struct State: Codable {
         var known: Set<String> = []
@@ -228,6 +232,7 @@ public final class LibrarySync {
                     failures.append("\(book.title): \(Self.describe(error))")
                 }
             }
+            await afterSync?()
             return failures.isEmpty ? nil : "Some books didn't sync: " + failures.joined(separator: "; ")
         } catch {
             return Self.describe(error)
@@ -236,6 +241,7 @@ public final class LibrarySync {
 
     private static func describe(_ error: Error) -> String {
         if error is SyncUnauthorizedError { return "unauthorized" }
+        if error is SyncProRequiredError { return "pro_required" }
         if let e = error as? SyncUnavailableError { return e.description }
         return (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
     }

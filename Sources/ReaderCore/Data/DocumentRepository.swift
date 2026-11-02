@@ -155,7 +155,8 @@ public final class DocumentRepository: @unchecked Sendable {
                 sizeBytes: size,
                 pageCount: pages,
                 lastOpenedAt: now(),
-                readingMode: ReadingMode.pages.rawValue,
+                // New books open in flowing text; the mode last used is remembered from then on.
+                readingMode: ReadingMode.text.rawValue,
                 format: format
             )
         }

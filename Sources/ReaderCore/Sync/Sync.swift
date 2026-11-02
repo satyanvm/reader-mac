@@ -18,6 +18,11 @@ public struct SyncUnauthorizedError: Error {
     public init() {}
 }
 
+/// The account doesn't have Pro, which sync is part of (HTTP 402 `pro_required`).
+public struct SyncProRequiredError: Error {
+    public init() {}
+}
+
 /// Network or server failure that's worth retrying later.
 public struct SyncUnavailableError: Error, CustomStringConvertible {
     public let description: String

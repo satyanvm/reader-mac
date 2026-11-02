@@ -7,6 +7,7 @@ import PDFKit
 ///     PDF text lines (or OCR of the page image, if the page has no text)
 ///       → running headers/footers removed (compared with nearby pages)
 ///       → reflowed into paragraphs and headings with italics/bold
+///       → figures (images drawn on the page) placed between the paragraphs around them
 ///       → paragraphs split by a page break rejoined
 ///
 /// Text is kept per source page, so a position ("page 186, 40% down") means the same place here
@@ -39,12 +40,19 @@ public final class TextDocument: @unchecked Sendable {
     private struct RawPage {
         let lines: [Line]
         let recognized: Bool
+        /// Figures drawn on the page; their lines (labels) are left out of `lines`.
+        var figures: [Reflow.Figure] = []
+        /// OCR failed (rather than finding no text), or only the low-quality fallback worked: the
+        /// page isn't cached, so it's tried again next time.
+        var ocrFailed = false
     }
 
     /// Bump when the pipeline's output changes, so old cached text is rebuilt.
-    public static let cacheVersion = 4
+    public static let cacheVersion = 10
     /// Wide enough that body text is ~30px tall, which OCR reads reliably.
     static let ocrWidth = 1600
+    /// A scanned page with fewer words than this, mostly ink, is a picture (a cover, a plate).
+    static let pictureWords = 40
 
     public static func cacheDir(base: URL, documentId: String) -> URL {
         base.appendingPathComponent("text-v\(cacheVersion)/\(documentId)", isDirectory: true)
@@ -119,7 +127,9 @@ public final class TextDocument: @unchecked Sendable {
         let text = PageText(blocks: PageAssembly.assemble(prev: prev, page: current, next: next),
                             recognized: rawPage(index).recognized)
         // Best effort: if the cache can't be written the page is just rebuilt next time.
-        if let data = try? text.json() { try? data.write(to: cacheFile(index), options: .atomic) }
+        // A paragraph can be pulled in from the next page, so neighbours must be final too.
+        let final = (max(0, index - 1)...min(pageCount - 1, index + 1)).allSatisfy { !rawPage($0).ocrFailed }
+        if final, let data = try? text.json() { try? data.write(to: cacheFile(index), options: .atomic) }
         return text
     }
 
@@ -128,7 +138,8 @@ public final class TextDocument: @unchecked Sendable {
         let neighbours = ((index - PageAssembly.window)...(index + PageAssembly.window))
             .filter { $0 != index && $0 >= 0 && $0 < pageCount }
             .map { rawPage($0).lines }
-        let blocks = Reflow.blocks(PageAssembly.stripRunningLines(rawPage(index).lines, neighbours: neighbours))
+        let page = rawPage(index)
+        let blocks = Reflow.blocks(PageAssembly.stripRunningLines(page.lines, neighbours: neighbours), figures: page.figures)
         remember(&reflowed, &reflowOrder, index, blocks)
         return blocks
     }
@@ -137,14 +148,70 @@ public final class TextDocument: @unchecked Sendable {
         if let r = raw[index] { return r }
         if document == nil, !closed { document = PDFDocument(url: pdfURL) }
         let page = document?.page(at: index)
-        let lines = page.map(PdfLineExtractor.lines) ?? []
-        var result = RawPage(lines: lines, recognized: false)
-        if lines.isEmpty, let ocr, let page, let image = PdfBook.render(page, width: Self.ocrWidth) {
-            let recognized = (try? ocr.lines(image)) ?? []
-            result = RawPage(lines: recognized, recognized: !recognized.isEmpty)
+        var lines = page.map(PdfLineExtractor.lines) ?? []
+        var figures: [Reflow.Figure] = []
+        let regions = page.map(PdfImageExtractor.regions) ?? []
+        if let page, !lines.isEmpty {
+            let box = page.bounds(for: .cropBox)
+            for region in PdfImageExtractor.figures(regions, lines: lines, pageSize: box.size) {
+                lines.removeAll { PdfImageExtractor.contains(region, $0) }
+                figures.append(figure(index, region))
+            }
+        }
+        var result = RawPage(lines: lines, recognized: false, figures: figures)
+        let picture = page.flatMap { page in
+            let area = page.bounds(for: .cropBox).width * page.bounds(for: .cropBox).height
+            return regions.filter { !$0.vector }
+                .max { $0.rect.width * $0.rect.height < $1.rect.width * $1.rect.height }
+                .flatMap { $0.rect.width * $0.rect.height >= area * 0.4 ? $0 : nil }
+        }
+        if lines.isEmpty, figures.isEmpty, let picture, hasTextNearby(index) {
+            // A page that's one picture in a book of real text (a cover, a chart, a plate): shown
+            // as it is. Reading its words would scatter them without the picture.
+            result = RawPage(lines: [], recognized: false, figures: [figure(index, picture)])
+        } else if lines.isEmpty, figures.isEmpty, let ocr, let page, let image = PdfBook.render(page, width: Self.ocrWidth) {
+            do {
+                let recognized = try ocr.recognize(image)
+                result = RawPage(lines: recognized.lines, recognized: !recognized.lines.isEmpty,
+                                 ocrFailed: recognized.degraded)
+                // In a scanned book: a cover or a photo plate, mostly ink with a few words on it.
+                let words = recognized.lines.reduce(0) { $0 + $1.text.split(separator: " ").count }
+                if let picture, words < Self.pictureWords, Self.ink(image) > 0.15 {
+                    result = RawPage(lines: [], recognized: false, figures: [figure(index, picture)])
+                }
+            } catch {
+                result = RawPage(lines: [], recognized: false, ocrFailed: true)
+            }
         }
         remember(&raw, &rawOrder, index, result)
         return result
+    }
+
+    /// Pages around `index` carry PDF text: the book is typeset, not scanned.
+    private func hasTextNearby(_ index: Int) -> Bool {
+        ((index - 3)...(index + 3)).contains { i in
+            i != index && i >= 0 && i < pageCount &&
+                document?.page(at: i)?.string?.contains(where: \.isLetter) == true
+        }
+    }
+
+    /// How much of an image isn't paper: a cover or a photo is mostly ink, a scanned page of
+    /// type mostly white.
+    static func ink(_ image: CGImage) -> Double {
+        let w = 64, h = max(1, 64 * image.height / max(1, image.width))
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
+                                  space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue)
+        else { return 0 }
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        guard let data = ctx.data else { return 0 }
+        let pixels = data.bindMemory(to: UInt8.self, capacity: w * h)
+        let dark = (0..<(w * h)).filter { pixels[$0] < 200 }.count
+        return Double(dark) / Double(w * h)
+    }
+
+    private func figure(_ index: Int, _ region: PdfImageExtractor.Region) -> Reflow.Figure {
+        Reflow.Figure(top: Float(region.rect.minY), bottom: Float(region.rect.maxY),
+                      block: Block(.image, image: PdfImageExtractor.reference(page: index, region)))
     }
 
     /// Small LRU: keeps the 24 most recent pages, like the Android implementation.

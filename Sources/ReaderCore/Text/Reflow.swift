@@ -20,18 +20,67 @@ public enum Reflow {
     /// Blocks for one page, in reading order. Multi-column pages are read column by column, and
     /// footnotes (smaller type at the foot of a column) come last, as `.note` blocks, so they
     /// never split a paragraph that runs on into the next column or page.
-    public static func blocks(_ input: [Line]) -> [Block] {
+    public static func blocks(_ input: [Line]) -> [Block] { blocks(input, figures: []) }
+
+    /// A figure on the page: its vertical extent (in `Line` units) and the `.image` block for it.
+    public struct Figure: Sendable {
+        public var top: Float
+        public var bottom: Float
+        public var block: Block
+        public init(top: Float, bottom: Float, block: Block) {
+            self.top = top
+            self.bottom = bottom
+            self.block = block
+        }
+    }
+
+    /// Blocks with figures in their place: the text above a figure, the figure, the text below.
+    /// A paragraph that runs on past a figure stays one paragraph, with the figure after it.
+    /// `input` shouldn't include lines drawn on a figure (they're part of its image).
+    public static func blocks(_ input: [Line], figures: [Figure]) -> [Block] {
         let lines = dropPageNumbers(mergeSameRow(
             input.map { var l = $0; l.spans = normalizeSpaces(l.spans); return l }
                 .filter { !$0.text.isBlank }
         ))
-        if lines.isEmpty { return [] }
+        let figures = figures.sorted { $0.top < $1.top }
+        if lines.isEmpty { return figures.map(\.block) }
 
-        let body = median(lines.map(\.fontSize))
+        let body = bodySize(lines)
+        // Lines are split at each figure's middle, so text set beside a figure stays with its row.
+        var bands: [[Line]] = []
+        var rest = lines
+        for f in figures {
+            let mid = (f.top + f.bottom) / 2
+            bands.append(rest.filter { $0.y - $0.fontSize * 0.35 < mid })
+            rest = rest.filter { $0.y - $0.fontSize * 0.35 >= mid }
+        }
+        bands.append(rest)
+
+        var out: [Block] = []
+        var notes: [Block] = []
+        for (i, band) in bands.enumerated() {
+            let (blocks, foot) = bandBlocks(band, body: body, footnotes: i == bands.count - 1)
+            if let last = out.lastIndex(where: { $0.kind != .image }), let first = blocks.first,
+               continues(out[last], first, nextPageUsesIndents: blocks.contains(where: \.indented)) {
+                out[last] = merge(out[last], first)
+                out += blocks.dropFirst()
+            } else {
+                out += blocks
+            }
+            notes += foot
+            if i < figures.count { out.append(figures[i].block) }
+        }
+        return out + notes
+    }
+
+    /// Reflow of one stretch of the page between figures: (main blocks, footnotes).
+    private static func bandBlocks(_ lines: [Line], body: Float, footnotes: Bool) -> ([Block], [Block]) {
+        if lines.isEmpty { return ([], []) }
         var out: [Block] = []
         var notes: [Block] = []
         for column in columns(lines, body: body) {
-            let (main, foot) = splitFootnotes(column, body: body)
+            // Small type just above a figure is a caption, not a footnote.
+            let (main, foot) = footnotes ? splitFootnotes(column, body: body) : (column, [])
             let blocks = columnBlocks(main, body: body)
             // A paragraph that runs from the foot of one column to the head of the next is one.
             if let last = out.last, let first = blocks.first,
@@ -43,7 +92,7 @@ public enum Reflow {
             }
             notes += footnoteBlocks(foot)
         }
-        return out + notes
+        return (out, notes)
     }
 
     /// The single-column reflow (the Android algorithm), with margins measured on this column.
@@ -56,6 +105,7 @@ public enum Reflow {
         let gaps = zip(bodyLines, bodyLines.dropFirst()).map { $1.y - $0.y }.filter { $0 > 0 }
         let lineGap = gaps.isEmpty ? body * 1.2 : median(gaps)
         let indentMin = body * 0.8
+        let list = isList(lines, body: body)
 
         var blocks: [Block] = []
         var current: [Line] = []
@@ -78,7 +128,8 @@ public enum Reflow {
                 startsNew = isLarger(line.fontSize, body) != isLarger(prev.fontSize, body) ||
                     line.y - prev.y > lineGap * 1.6 ||
                     (indented && abs(line.x - prev.x) > indentMin / 2) ||
-                    (prev.endX < right - body * 3 && endsSentence(prev.text.trimmingTrailingWhitespace))
+                    (prev.endX < right - body * 3 && endsSentence(prev.text.trimmingTrailingWhitespace)) ||
+                    (list && line.text.trimmingLeadingWhitespace.first?.isLowercase != true)
             }
             if startsNew {
                 flush()
@@ -88,6 +139,19 @@ public enum Reflow {
         }
         flush()
         return blocks
+    }
+
+    /// Lines that are each their own entry: a table of contents, a title page, verse. Prose runs
+    /// lines to the right margin and carries sentences over (so many lines start in lowercase);
+    /// a list does neither.
+    static func isList(_ lines: [Line], body: Float) -> Bool {
+        guard lines.count >= 4 else { return false }
+        let rest = lines.dropFirst()
+        let lowercase = rest.filter { $0.text.trimmingLeadingWhitespace.first?.isLowercase == true }.count
+        guard Float(lowercase) < Float(rest.count) * 0.25 else { return false }
+        let far = lines.map(\.endX).max()!
+        let full = lines.dropLast().filter { $0.endX >= far - body }.count
+        return Float(full) < Float(lines.count - 1) * 0.6
     }
 
     /// PDF text extraction can hand back one visual line as several pieces (a font change, a
@@ -198,7 +262,7 @@ public enum Reflow {
                 let next = line.spans.first?.text.trimmingLeadingWhitespace ?? ""
                 let chars = Array(lastText)
                 if chars.count >= 2, chars[chars.count - 1] == "-", chars[chars.count - 2].isLetter,
-                   next.first?.isLowercase == true {
+                   next.first?.isLowercase == true || brokenCapitals(chars.dropLast(), next) {
                     out[out.count - 1].text = String(chars.dropLast())
                 } else {
                     out[out.count - 1].text = lastText + " "
@@ -212,6 +276,14 @@ public enum Reflow {
         }
         if !out.isEmpty { out[out.count - 1].text = out[out.count - 1].text.trimmingTrailingWhitespace }
         return out.compact()
+    }
+
+    /// A word set in capitals broken at a line end ("END-" / "LESSNESS"): both halves are two or
+    /// more capitals. A capitalized word after the hyphen ("Anglo-" / "Saxon") stays hyphenated.
+    private static func brokenCapitals(_ before: ArraySlice<Character>, _ next: String) -> Bool {
+        let head = before.reversed().prefix { $0.isLetter }
+        let tail = next.prefix { $0.isLetter }
+        return head.count >= 2 && tail.count >= 2 && head.allSatisfy(\.isUppercase) && tail.allSatisfy(\.isUppercase)
     }
 
     /// Can `next` (first block of a page) continue `prev` (last block of the page before)?
@@ -247,6 +319,19 @@ public enum Reflow {
         while start < end, isPageNumber(lines[start].text) { start += 1 }
         while end > start, isPageNumber(lines[end - 1].text) { end -= 1 }
         return Array(lines[start..<end])
+    }
+
+    /// The size most of the text is set in: the median over characters, not lines, so a
+    /// diagram's scattered one-word labels don't outvote the paragraphs.
+    static func bodySize(_ lines: [Line]) -> Float {
+        let sorted = lines.map { ($0.fontSize, $0.text.count) }.sorted { $0.0 < $1.0 }
+        let total = sorted.reduce(0) { $0 + $1.1 }
+        var seen = 0
+        for (size, count) in sorted {
+            seen += count
+            if seen * 2 >= total { return size }
+        }
+        return sorted.last?.0 ?? 0
     }
 
     private static func isLarger(_ size: Float, _ body: Float) -> Bool { size > body * 1.15 }
