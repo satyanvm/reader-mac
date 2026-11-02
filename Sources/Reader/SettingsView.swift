@@ -19,7 +19,7 @@ struct AccountSettingsView: View {
     var body: some View {
         Form {
             switch account.stage {
-            case .signedOut: SignInForm(account: account)
+            case .signedOut: SignInChoices(account: account)
             case .awaitingCode(let email, let purpose): CodeForm(account: account, email: email, purpose: purpose)
             case .signedIn(let email): SignedInView(account: account, email: email)
             }
@@ -49,6 +49,62 @@ final class AccountAction {
                 self.error = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             }
             working = false
+        }
+    }
+}
+
+/// Signed out: sign in or create an account on the website (it hands the sign-in back to the app),
+/// or with email and password here.
+private struct SignInChoices: View {
+    let account: SyncAccount
+    @ViewState private var inApp = false
+
+    var body: some View {
+        if inApp {
+            SignInForm(account: account)
+            Section {
+                Button("Sign in on the website instead") { inApp = false }
+                    .buttonStyle(.link)
+            }
+        } else {
+            Section {
+                if let pending = account.webSignIn {
+                    HStack(spacing: 10) {
+                        ProgressView().controlSize(.small)
+                        Text(pending.mode == .signUp ? "Finish creating your account in your browser…" : "Finish signing in in your browser…")
+                    }
+                    HStack {
+                        Button("Open Browser Again") { account.reopenWebSignIn() }
+                        Spacer()
+                        Button("Cancel") { account.cancelWebSignIn() }
+                    }
+                } else {
+                    Button { account.beginWebSignIn(.signIn) } label: {
+                        Text("Sign In").frame(maxWidth: .infinity)
+                    }
+                    .controlSize(.large)
+                    .keyboardShortcut(.defaultAction)
+                    Button { account.beginWebSignIn(.signUp) } label: {
+                        Text("Create Account").frame(maxWidth: .infinity)
+                    }
+                    .controlSize(.large)
+                }
+            } header: {
+                Text("Keep your place in sync on all your devices")
+            } footer: {
+                VStack(alignment: .leading, spacing: 6) {
+                    if let error = account.webSignInError { Text(error).foregroundStyle(.red) }
+                    Text("Opens \(account.websiteURL.host() ?? "the website") in your browser. When you're done there, you're signed in here.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Section {
+                Button("Use email and password in the app instead") {
+                    account.cancelWebSignIn()
+                    inApp = true
+                }
+                .buttonStyle(.link)
+            }
         }
     }
 }
@@ -197,24 +253,35 @@ private struct SignedInView: View {
     var body: some View {
         Section {
             LabeledContent("Signed in as", value: email)
-            LabeledContent("Status") {
-                Text(status).foregroundStyle(account.lastError == nil ? Color.secondary : Color.red)
-            }
-            LabeledContent("Waiting to upload", value: account.pendingCount == 1 ? "1 book" : "\(account.pendingCount) books")
-        } footer: {
-            Text("Your place in every book is saved on this Mac first, then synced. Sign in with the same account on your other devices to pick up where you left off.")
-                .foregroundStyle(.secondary)
+            LabeledContent("Plan", value: account.isPro ? "Readserene Pro" + (account.billing?.plan.map { " (\($0))" } ?? "") : "Free")
+        }
+        if account.isPro {
+            syncSection
+        } else {
+            ProOffer(account: account)
         }
         Section {
             HStack {
-                Button("Sync Now") { account.syncNow() }
-                    .disabled(account.isSyncing)
                 if account.isSyncing { ProgressView().controlSize(.small) }
                 Spacer()
                 Button("Sign Out") { account.signOut() }
             }
         }
         .onAppear { account.refreshPendingCount() }
+        .task { await account.refreshBilling() }
+    }
+
+    @ViewBuilder
+    private var syncSection: some View {
+        Section {
+            LabeledContent("Status") {
+                Text(status).foregroundStyle(account.lastError == nil ? Color.secondary : Color.red)
+            }
+            LabeledContent("Waiting to upload", value: account.pendingCount == 1 ? "1 book" : "\(account.pendingCount) books")
+        } footer: {
+            Text("Your books and your place in each one sync on their own: saved on this Mac first, then sent to your account. Books added on your other devices download here, and every book opens where you left off.")
+                .foregroundStyle(.secondary)
+        }
     }
 
     private var status: String {
@@ -222,5 +289,48 @@ private struct SignedInView: View {
         if let error = account.lastError { return error }
         guard let at = account.lastSuccess else { return "Up to date" }
         return "Up to date · \(at.formatted(date: .omitted, time: .shortened))"
+    }
+}
+
+/// Signed in without Pro: what Pro adds, and the way to buy it (Razorpay's page, in the browser).
+private struct ProOffer: View {
+    let account: SyncAccount
+    @ViewState private var action = AccountAction()
+
+    var body: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 6) {
+                Label("Sync is part of Readserene Pro", systemImage: "sparkles").font(.headline)
+                Text("Your library and your place in every book, on all your devices. Everything else stays free, and your books stay on this Mac.")
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 4)
+            if account.awaitingPurchase {
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small)
+                    Text("Finish paying in your browser. Sync turns on here by itself.")
+                }
+            }
+            let plans = account.billing?.plans ?? []
+            if account.billing != nil && plans.isEmpty {
+                Text("Pro isn't on sale just yet. Please check back soon.").foregroundStyle(.secondary)
+            }
+            HStack {
+                if plans.contains("monthly") {
+                    Button("Get Pro Monthly") { action.run { try await account.buyPro(plan: "monthly") } }
+                        .buttonStyle(.borderedProminent)
+                }
+                if plans.contains("yearly") {
+                    Button("Get Pro Yearly") { action.run { try await account.buyPro(plan: "yearly") } }
+                }
+                Spacer()
+                if action.working { ProgressView().controlSize(.small) }
+                Button("I've Paid, Check Again") { Task { await account.refreshBilling() } }
+                    .buttonStyle(.link)
+            }
+            if let error = action.error ?? account.billingError {
+                Text(error).foregroundStyle(.red)
+            }
+        }
     }
 }

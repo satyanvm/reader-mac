@@ -113,4 +113,17 @@ private final class LibraryDevice {
         await mac.sync.runOnce()
         #expect(mac.ids == [doc.id])
     }
+
+    @Test func positionsCatchUpAfterTheAccountsBooksHaveArrived() async throws {
+        let server = FakeLibraryServer()
+        let mac = try LibraryDevice(server), laptop = try LibraryDevice(server)
+        let doc = try mac.add("Meditations", text: "Book one.")
+        await mac.sync.runOnce()
+
+        // The hook sees every book the account has, including the one that just downloaded.
+        var seen: Set<String> = []
+        laptop.sync.afterSync = { [laptop] in seen = laptop.ids }
+        #expect(await laptop.sync.runOnce() == nil)
+        #expect(seen == [doc.id])
+    }
 }

@@ -22,6 +22,18 @@ struct ReaderApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // readserene:// links (the website handing back a sign-in), including one that launches the app.
+        NSAppleEventManager.shared().setEventHandler(self, andSelector: #selector(handleGetURL(_:reply:)),
+                                                     forEventClass: AEEventClass(kInternetEventClass),
+                                                     andEventID: AEEventID(kAEGetURL))
+    }
+
+    @objc private func handleGetURL(_ event: NSAppleEventDescriptor, reply: NSAppleEventDescriptor) {
+        guard let text = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue, let url = URL(string: text) else { return }
+        MainActor.assumeIsolated { AppGraph.shared.account.handleLink(url) }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         MainActor.assumeIsolated {
             AppGraph.shared.start()
@@ -33,14 +45,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NotificationCenter.default.addObserver(forName: NSApplication.willResignActiveNotification, object: nil, queue: .main, using: flush)
             // Back in the app: books that are open may have been read further on another device.
             NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
-                MainActor.assumeIsolated { AppGraph.shared.refreshOpenReaders() }
+                MainActor.assumeIsolated {
+                    AppGraph.shared.refreshOpenReaders()
+                    // Back from a checkout in the browser, or Pro changed on another device.
+                    Task { await AppGraph.shared.account.refreshBilling() }
+                }
             }
         }
     }
 
     /// Finder "Open With", double-click, or dropping files on the Dock icon.
     func application(_ application: NSApplication, open urls: [URL]) {
-        MainActor.assumeIsolated { AppGraph.shared.open(urls: urls) }
+        MainActor.assumeIsolated {
+            for link in urls where WebSignIn.isCallback(link) { AppGraph.shared.account.handleLink(link) }
+            let files = urls.filter(\.isFileURL)
+            if !files.isEmpty { AppGraph.shared.open(urls: files) }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -104,10 +124,10 @@ struct ReaderCommands: Commands {
                 .keyboardShortcut("[")
                 .disabled(reader == nil)
             Divider()
-            Button("Next Page") { reader?.nextPage() }
+            Button("Next Page") { reader?.turnPage(forward: true) }
                 .keyboardShortcut(.downArrow, modifiers: [.command, .option])
                 .disabled(reader == nil)
-            Button("Previous Page") { reader?.previousPage() }
+            Button("Previous Page") { reader?.turnPage(forward: false) }
                 .keyboardShortcut(.upArrow, modifiers: [.command, .option])
                 .disabled(reader == nil)
             Button("First Page") { reader?.goToPage(0) }

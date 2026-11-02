@@ -101,6 +101,39 @@ func page(_ build: (PageBuilder) -> Void) -> [Line] {
         #expect(blocks.first?.text == "a well-known, long- Term plan")
     }
 
+    @Test func aWordInCapitalsBrokenAtALineEndIsRejoined() {
+        let blocks = Reflow.blocks(page {
+            $0.line("where our LORD SOVEREIGN END-")
+            $0.line("LESSNESS dwells, in the ANGLO-", full: true)
+            $0.line("Saxon way.", full: false)
+        })
+        #expect(blocks.first?.text == "where our LORD SOVEREIGN ENDLESSNESS dwells, in the ANGLO- Saxon way.")
+    }
+
+    @Test func aTableOfContentsKeepsOneEntryPerLine() {
+        let blocks = Reflow.blocks(page {
+            $0.line("Preface: Zero to One", full: false)
+            $0.line("1 The Challenge of the Future", full: false)
+            $0.line("2 Party Like It’s 1999", full: false)
+            $0.line("3 All Happy Companies Are Different", full: false)
+            $0.line("4 The Ideology of Competition", full: false)
+            $0.line("Acknowledgments", full: false)
+        })
+        #expect(blocks.map(\.text) == ["Preface: Zero to One", "1 The Challenge of the Future", "2 Party Like It’s 1999",
+                                       "3 All Happy Companies Are Different", "4 The Ideology of Competition", "Acknowledgments"])
+    }
+
+    @Test func diagramLabelsDontOutvoteTheBodyText() {
+        // Many tiny labels (a diagram's) and a few body lines: the body is still the body.
+        var lines = page {
+            $0.line("We used pictures, because your brain is tuned for visuals, not text. As")
+            $0.line("far as your brain is concerned, a picture really is worth many words.", full: false)
+        }
+        for i in 0..<12 { lines.append(Line(spans: [Span("obj")], x: 450, endX: 460, y: 300 + Float(i) * 4, fontSize: 2)) }
+        let blocks = Reflow.blocks(lines)
+        #expect(blocks.first?.kind == .paragraph, "\(blocks)")
+    }
+
     @Test func italicsSurviveAndSameStyleRunsMerge() {
         let blocks = Reflow.blocks(page {
             $0.spans(Span("contented with your condition. "), Span("First", italic: true), Span(", because it has"))

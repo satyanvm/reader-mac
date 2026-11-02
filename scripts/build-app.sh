@@ -2,6 +2,8 @@
 # Builds Reader.app with the Swift Package Manager (Command Line Tools are enough; Xcode isn't
 # needed) and ad-hoc signs it. Usage: scripts/build-app.sh [debug|release]
 #   READER_SYNC_SERVER       sync server the app signs in to (default: the deployed Worker)
+#   READER_WEBSITE           site whose /app page signs the app in (default https://readserene.site;
+#                            http://localhost:4321 for the site's dev server)
 #   READER_GOOGLE_CLIENT_ID  Google OAuth client id (iOS/macOS type) for "Continue with Google"
 #   READER_BUNDLE_ID         default io.github.satyanvm.reader; a different id (and app name, from
 #   READER_APP_NAME)         READER_APP_NAME) makes a side-by-side dev copy
@@ -9,6 +11,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 CONFIG="${1:-release}"
 SYNC_SERVER="${READER_SYNC_SERVER:-https://reader-sync.satyanarayanv2050.workers.dev}"
+WEBSITE="${READER_WEBSITE:-https://readserene.site}"
 GOOGLE_CLIENT_ID="${READER_GOOGLE_CLIENT_ID:-}"
 BUNDLE_ID="${READER_BUNDLE_ID:-io.github.satyanvm.reader}"
 APP_NAME="${READER_APP_NAME:-Reader}"
@@ -39,7 +42,15 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>NSSupportsAutomaticTermination</key><false/>
     <key>NSSupportsSuddenTermination</key><false/>
     <key>ReaderSyncServer</key><string>$SYNC_SERVER</string>
+    <key>ReaderWebsite</key><string>$WEBSITE</string>
     <key>GoogleClientID</key><string>$GOOGLE_CLIENT_ID</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key><string>Readserene sign-in</string>
+            <key>CFBundleURLSchemes</key><array><string>readserene</string></array>
+        </dict>
+    </array>
     <key>NSAppTransportSecurity</key>
     <dict><key>NSAllowsLocalNetworking</key><true/></dict>
     <key>CFBundleDocumentTypes</key>

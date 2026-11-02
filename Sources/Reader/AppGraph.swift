@@ -187,6 +187,18 @@ final class AppGraph {
         account = SyncAccount(libraryDir: supportDir, engine: syncEngine, scheduler: syncScheduler, positions: positions,
                               library: librarySync)
         positions.onPendingChange = { [syncScheduler] in syncScheduler.requestSync() }
+        librarySync.afterSync = { [weak self] in await self?.pullPositions() }
+    }
+
+    /// Brings every book's place up to date from the account, so the library shows how far along
+    /// each one is and a book opens where it was left on another device, even offline later.
+    /// Open books aren't touched here: their readers check the server themselves.
+    private func pullPositions() async {
+        let open = Set(openReaders.values.compactMap { $0.model?.documentId })
+        for doc in (try? documents.all()) ?? [] where !open.contains(doc.id) {
+            guard syncEngine.isEnabled else { return }
+            _ = await syncEngine.pull(doc.id)
+        }
     }
 
     let account: SyncAccount

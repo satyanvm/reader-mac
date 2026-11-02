@@ -114,6 +114,18 @@ final class ReaderModel {
     func nextPage() { controller.goToPage(state.pageIndex + pageStep) }
     func previousPage() { controller.goToPage(max(0, state.pageIndex - pageStep)) }
     func goToPage(_ index: Int) { controller.goToPage(index) }
+
+    /// The ‹ › buttons and the Go menu: flowing text read page by page turns what's on screen
+    /// (one page, or two side by side); otherwise it moves to the next or previous page.
+    func turnPage(forward: Bool) {
+        if isTextMode, flowLayout == .paged, let flow = probe as? FlowCoordinator {
+            flow.turnPage(forward: forward)
+        } else if forward {
+            nextPage()
+        } else {
+            previousPage()
+        }
+    }
     func restartFromBeginning() { controller.restartFromBeginning() }
 
     /// The page at the top of the window was read by OCR, so it may contain mistakes.
